@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Deep iOS 27 Spatial Obsidian Base -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="135"
+                android:startColor="#050816"
+                android:centerColor="#0B112C"
+                android:endColor="#120B2E"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Top-Left Cyan Aurora Glow -->
+    <item
+        android:top="-120dp"
+        android:left="-100dp"
+        android:right="120dp"
+        android:bottom="350dp">
+        <shape android:shape="oval">
+            <gradient
+                android:centerColor="#2800E5FF"
+                android:endColor="#0000E5FF"
+                android:gradientRadius="320dp"
+                android:startColor="#4500E5FF"
+                android:type="radial" />
+        </shape>
+    </item>
+    <!-- Bottom-Right Violet-Magenta Liquid Orb -->
+    <item
+        android:top="280dp"
+        android:left="100dp"
+        android:right="-120dp"
+        android:bottom="-120dp">
+        <shape android:shape="oval">
+            <gradient
+                android:centerColor="#24A855F7"
+                android:endColor="#00A855F7"
+                android:gradientRadius="340dp"
+                android:startColor="#42EC4899"
+                android:type="radial" />
+        </shape>
+    </item>
+</layer-list>

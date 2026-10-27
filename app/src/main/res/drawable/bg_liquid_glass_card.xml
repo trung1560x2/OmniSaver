@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Outer Diagonal Specular Refraction Rim (iOS 27 Liquid Glass Edge) -->
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="26dp" />
+            <gradient
+                android:angle="135"
+                android:startColor="#75FFFFFF"
+                android:centerColor="#2294A3B8"
+                android:endColor="#4038BDF8"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Inner Frosted Translucent Glass Body -->
+    <item
+        android:bottom="1.2dp"
+        android:left="1.2dp"
+        android:right="1.2dp"
+        android:top="1.2dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="25dp" />
+            <gradient
+                android:angle="135"
+                android:startColor="#CC162040"
+                android:centerColor="#B8111936"
+                android:endColor="#CC0E152D"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Top Specular Glass Reflection Sheen -->
+    <item
+        android:bottom="1.2dp"
+        android:left="1.2dp"
+        android:right="1.2dp"
+        android:top="1.2dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="25dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#29FFFFFF"
+                android:centerColor="#08FFFFFF"
+                android:endColor="#00FFFFFF"
+                android:type="linear" />
+        </shape>
+    </item>
+</layer-list>

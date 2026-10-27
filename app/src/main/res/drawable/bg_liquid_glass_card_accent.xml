@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Iridescent Cyan-Violet Specular Rim -->
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="26dp" />
+            <gradient
+                android:angle="135"
+                android:startColor="#9900E5FF"
+                android:centerColor="#44FFFFFF"
+                android:endColor="#88A855F7"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Inner Frosted Glass Body -->
+    <item
+        android:bottom="1.4dp"
+        android:left="1.4dp"
+        android:right="1.4dp"
+        android:top="1.4dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="25dp" />
+            <gradient
+                android:angle="135"
+                android:startColor="#D9152248"
+                android:centerColor="#C2111B3B"
+                android:endColor="#D918153C"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Top Glass Gloss -->
+    <item
+        android:bottom="1.4dp"
+        android:left="1.4dp"
+        android:right="1.4dp"
+        android:top="1.4dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="25dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#30FFFFFF"
+                android:centerColor="#0AFFFFFF"
+                android:endColor="#00FFFFFF"
+                android:type="linear" />
+        </shape>
+    </item>
+</layer-list>

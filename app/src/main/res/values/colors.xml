@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#050816</color>
+    <color name="surface_card">#CC141E3C</color>
+    <color name="accent_primary">#00E5FF</color>
+    <color name="accent_secondary">#A855F7</color>
+    <color name="accent_success">#10B981</color>
+    <color name="text_primary">#F8FAFC</color>
+    <color name="text_secondary">#CBD5E1</color>
+    <color name="glass_rim_light">#80FFFFFF</color>
+</resources>

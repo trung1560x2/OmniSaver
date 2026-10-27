@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Specular Outer Rim -->
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="22dp" />
+            <gradient
+                android:angle="135"
+                android:startColor="#B3FFFFFF"
+                android:centerColor="#6638BDF8"
+                android:endColor="#99A855F7"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Iridescent Liquid Cyan -> Indigo -> Violet Core -->
+    <item
+        android:bottom="1.2dp"
+        android:left="1.2dp"
+        android:right="1.2dp"
+        android:top="1.2dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="21dp" />
+            <gradient
+                android:angle="0"
+                android:startColor="#00D2FF"
+                android:centerColor="#3B82F6"
+                android:endColor="#8B5CF6"
+                android:type="linear" />
+        </shape>
+    </item>
+    <!-- Top Liquid Gloss Highlight -->
+    <item
+        android:bottom="24dp"
+        android:left="2dp"
+        android:right="2dp"
+        android:top="1.5dp">
+        <shape android:shape="rectangle">
+            <corners
+                android:topLeftRadius="20dp"
+                android:topRightRadius="20dp"
+                android:bottomLeftRadius="6dp"
+                android:bottomRightRadius="6dp" />
+            <gradient
+                android:angle="270"
+                android:startColor="#55FFFFFF"
+                android:endColor="#00FFFFFF"
+                android:type="linear" />
+        </shape>
+    </item>
+</layer-list>

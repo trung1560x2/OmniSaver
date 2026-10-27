@@ -1,0 +1,3 @@
+-keep class com.omnisaver.videodownloader.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
