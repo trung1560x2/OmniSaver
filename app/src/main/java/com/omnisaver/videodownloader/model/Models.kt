@@ -35,7 +35,8 @@ data class MediaOption(
     val sizeText: String = "",
     val isHighestQuality: Boolean = false,
     val isNoWatermark: Boolean = true,
-    val customHeaders: Map<String, String> = emptyMap()
+    val customHeaders: Map<String, String> = emptyMap(),
+    val audioUrl: String? = null
 )
 
 data class ExtractedMediaInfo(

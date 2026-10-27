@@ -1,10 +1,10 @@
 {
-    "versionCode":  5,
-    "versionName":  "2.2.0-OTA",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.2.0-OTA/OmniSaver_iOS27_LiquidGlass_v2.2_OTA.apk",
-    "changelog":  "• Hỗ trợ tải Video Riêng Tư / Nhóm Kín chất lượng Full HD 1080p / HD 720p\n• Giao diện iOS 27 Liquid Glass (Solarium Spatial Glass) 100% Không Quảng Cáo\n• Tích hợp Trung tâm Cập nhật trực tuyến OTA kết nối trực tiếp GitHub Releases",
-    "publishedAt":  "2026-10-27",
-    "fileSizeBytes":  5345838,
-    "sha256":  "f8c99457d266273cd1c15fc4e158a1b5e51e1871ce01238488860789ce276ce5",
+    "versionCode":  6,
+    "versionName":  "2.3.0-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.3.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.3_FullHD.apk",
+    "changelog":  "â€¢ Sá»­a triá»‡t Ä‘á»ƒ lá»—i Facebook Story / Reel / Private chá»‰ hiá»‡n SD 360p (há»— trá»£ nested progressive_urls HD \u0026 chuáº©n chuyá»ƒn hÆ°á»›ng /share/ -\u003e /stories/)\nâ€¢ TÃ­ch há»£p bá»™ giáº£i mÃ£ DASH XML 1080p Full HD (\u003cRepresentation\u003e\u003cBaseURL\u003e) kÃ¨m tá»± Ä‘á»™ng ghÃ©p Ã¢m thanh gá»‘c AAC (MediaMuxer) trÃªn thiáº¿t bá»‹\nâ€¢ Kháº¯c phá»¥c lá»—i hiá»ƒn thá»‹ áº£nh bÃ¬a (preferred_thumbnail) vÃ  tá»‘i Æ°u láº¡i thanh Header Liquid Glass khÃ´ng bá»‹ trÃ n chá»¯",
+    "publishedAt":  "2026-10-28",
+    "fileSizeBytes":  5356446,
+    "sha256":  "f7085df9b01c9435562ce1aa67930a82d39ddd7bdfd199f759fc3039dafa67fd",
     "forceUpdate":  false
 }
