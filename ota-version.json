@@ -1,10 +1,10 @@
 {
-    "versionCode":  6,
-    "versionName":  "2.3.0-FullHD",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.3.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.3_FullHD.apk",
-    "changelog":  "â€¢ Sá»­a triá»‡t Ä‘á»ƒ lá»—i Facebook Story / Reel / Private chá»‰ hiá»‡n SD 360p (há»— trá»£ nested progressive_urls HD \u0026 chuáº©n chuyá»ƒn hÆ°á»›ng /share/ -\u003e /stories/)\nâ€¢ TÃ­ch há»£p bá»™ giáº£i mÃ£ DASH XML 1080p Full HD (\u003cRepresentation\u003e\u003cBaseURL\u003e) kÃ¨m tá»± Ä‘á»™ng ghÃ©p Ã¢m thanh gá»‘c AAC (MediaMuxer) trÃªn thiáº¿t bá»‹\nâ€¢ Kháº¯c phá»¥c lá»—i hiá»ƒn thá»‹ áº£nh bÃ¬a (preferred_thumbnail) vÃ  tá»‘i Æ°u láº¡i thanh Header Liquid Glass khÃ´ng bá»‹ trÃ n chá»¯",
+    "versionCode":  7,
+    "versionName":  "2.4.0-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.4.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.apk",
+    "changelog":  "• Sửa triệt để lỗi tải video Facebook Full HD 1080p không có âm thanh (tích hợp bộ ghép kênh ISO-BMFF Fragmented MP4 Muxer hỗ trợ mọi chuẩn nén video AV1 av01, VP9 vp09, H.264 avc1, HEVC hvc1 kèm âm thanh gốc HE-AAC mp4a.40.5)\n• Đảm bảo mọi luồng video DASH 1080p / 720p luôn tự động gắn kèm luồng âm thanh gốc M4A khi tải về\n• Nâng cấp giải mã chuẩn chất lượng NextGen DASH (_q90 = 1080p, _q80 = 720p) chính xác 100%",
     "publishedAt":  "2026-10-28",
-    "fileSizeBytes":  5356446,
-    "sha256":  "f7085df9b01c9435562ce1aa67930a82d39ddd7bdfd199f759fc3039dafa67fd",
+    "fileSizeBytes":  5366074,
+    "sha256":  "bc64c791b2d02ceb497e1c05e3f0ad825a965098a4ad88025db2da71e24924fd",
     "forceUpdate":  false
 }

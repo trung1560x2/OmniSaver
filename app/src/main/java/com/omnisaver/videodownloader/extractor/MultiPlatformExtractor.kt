@@ -897,7 +897,10 @@ class MultiPlatformExtractor(private val context: Context) {
             .trim()
             .takeIf { it.isNotEmpty() && it != "0" && it.all(Char::isDigit) }
 
-        val vencodeTag = json.optString("vencode_tag", "").lowercase(Locale.ROOT)
+        val vencodeTag = json.optString("vencode_tag", "")
+            .ifBlank { json.optString("venc_tags", "") }
+            .ifBlank { json.optString("encode_tag", "") }
+            .lowercase(Locale.ROOT)
         val isAudioOnly = (vencodeTag.contains("audio") || vencodeTag.contains("heaac") || vencodeTag.contains("opus") || vencodeTag.contains("mp4a")) &&
             !vencodeTag.contains("progressive")
 
@@ -916,23 +919,43 @@ class MultiPlatformExtractor(private val context: Context) {
 
         val resToken = Regex("""(?:^|[._-])(2160|1920|1440|1280|1080|720|540|480|360|240)p?(?:$|[._-])""")
             .find(vencodeTag)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val crfTier = Regex("""_q(90|80|70|60|50|40|30|20)(?:$|[._-])""")
+            .find(vencodeTag)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
         val (label, score) = when {
             resToken == 2160 -> "4K Ultra HD 2160p (MP4)" to 2160
             resToken == 1440 -> "2K QHD 1440p (MP4)" to 1440
-            resToken == 1080 || resToken == 1920 -> "Full HD 1080p (MP4)" to 1080
-            resToken == 720 || resToken == 1280 -> "HD 720p (MP4)" to 720
+            resToken == 1080 || resToken == 1920 || crfTier == 90 -> "Full HD 1080p (MP4)" to 1080
+            resToken == 720 || resToken == 1280 || crfTier == 80 -> "HD 720p (MP4)" to 720
+            crfTier == 70 -> "HD 640p (MP4)" to 640
             isExplicitHd -> "HD 720p / 1080p (MP4)" to 880
-            resToken == 540 -> "qHD 540p (MP4)" to 540
-            resToken == 480 -> "SD 480p (MP4)" to 480
-            resToken == 360 || isExplicitSd -> "SD 360p (MP4)" to 360
-            resToken == 240 -> "SD 240p (MP4)" to 240
+            resToken == 540 || crfTier == 60 -> "qHD 540p (MP4)" to 540
+            resToken == 480 || crfTier == 50 -> "SD 480p (MP4)" to 480
+            resToken == 360 || crfTier == 40 || isExplicitSd -> "SD 360p (MP4)" to 360
+            resToken == 240 || crfTier == 30 || crfTier == 20 -> "SD 240p (MP4)" to 240
             vencodeTag.contains("hd") || vencodeTag.contains("high") -> "HD 720p / 1080p (MP4)" to 880
             vencodeTag.contains("sd") -> "SD 360p (MP4)" to 360
             else -> null to 0
         }
 
         return FacebookEfgMeta(videoId, label, score, false)
+    }
+
+    private fun isFacebookDashVideoOnlyUrl(rawUrl: String): Boolean {
+        val efgMatch = Regex("""[?&]efg=([^&"'\s]+)""").find(rawUrl)?.groupValues?.getOrNull(1) ?: return false
+        val urlDecoded = runCatching { URLDecoder.decode(efgMatch, "UTF-8") }.getOrDefault(efgMatch)
+        val decodedJsonStr = runCatching {
+            val bytes = try {
+                Base64.decode(urlDecoded, Base64.URL_SAFE or Base64.NO_WRAP)
+            } catch (_: Exception) {
+                Base64.decode(urlDecoded, Base64.DEFAULT)
+            }
+            String(bytes, Charsets.UTF_8).lowercase(Locale.ROOT)
+        }.getOrNull() ?: return false
+
+        if (decodedJsonStr.contains("progressive")) return false
+        if (decodedJsonStr.contains("audio") || decodedJsonStr.contains("heaac")) return false
+        return decodedJsonStr.contains("\"dash_") || decodedJsonStr.contains("dash_r2") || decodedJsonStr.contains("dash_vp9") || decodedJsonStr.contains("dash_h264")
     }
 
     private fun extractFacebookVideoIdFromText(text: String): String? {
@@ -1044,7 +1067,7 @@ class MultiPlatformExtractor(private val context: Context) {
                 .containsMatchIn(afterSlice)
 
             when {
-                isHdMeta -> register(url, "HD 720p / 1080p (MP4)", 1050, isTargetSlice, null)
+                isHdMeta -> register(url, "HD 720p / 1080p Gốc (MP4)", 1050, isTargetSlice, null)
                 isSdMeta -> register(url, "SD 360p (MP4)", 380, isTargetSlice, null)
                 else -> register(url, "HD Video (MP4)", 740, isTargetSlice, null)
             }
@@ -1059,7 +1082,7 @@ class MultiPlatformExtractor(private val context: Context) {
         )
         for (regex in classicHdPatterns) {
             regex.findAll(region).forEach { m ->
-                register(m.groupValues.getOrNull(1), "HD 720p / 1080p (MP4)", 1040, isTargetSlice, null)
+                register(m.groupValues.getOrNull(1), "HD 720p / 1080p Gốc (MP4)", 1040, isTargetSlice, null)
             }
         }
 
@@ -1092,6 +1115,26 @@ class MultiPlatformExtractor(private val context: Context) {
         )
 
         var bestDashAudioUrl: String? = null
+
+        // Pre-scan Relay JSON `"base_url"` audio representations so `bestDashAudioUrl` is always known
+        val jsonBaseUrlRegex = Regex(""""base_url"\s*:\s*"(https?:[^"]+)"""")
+        val jsonBaseMatches = jsonBaseUrlRegex.findAll(region).toList()
+        for (jm in jsonBaseMatches) {
+            val cleanedUrl = sanitizeCandidateUrl(jm.groupValues[1])
+            val efg = inspectFacebookStreamUrl(cleanedUrl)
+            val start = (jm.range.first - 240).coerceAtLeast(0)
+            val end = (jm.range.last + 240).coerceAtMost(region.length)
+            val ctx = region.substring(start, end)
+            val isAudio = efg.isAudioOnly ||
+                ctx.contains("audio/mp4", ignoreCase = true) ||
+                ctx.contains("mp4a", ignoreCase = true)
+            if (isAudio) {
+                if (bestDashAudioUrl == null) {
+                    bestDashAudioUrl = cleanedUrl
+                }
+                register(cleanedUrl, "Âm thanh gốc (M4A)", 110, isTargetSlice, null)
+            }
+        }
 
         for (mpdBlock in mpdBlocks) {
             val repMatches = repRegex.findAll(mpdBlock).toList()
@@ -1140,44 +1183,23 @@ class MultiPlatformExtractor(private val context: Context) {
                 val height = Regex("""\bheight\s*=\s*"(\d+)"""").find(attrs)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
                 val shortSide = if (width > 0 && height > 0) minOf(width, height) else maxOf(width, height)
 
-                // Prioritize H.264 (`avc1`) and HEVC (`hvc1`/`hev1`) for 100% hardware MediaMuxer MPEG-4 compatibility
-                val isMp4MuxCompatible = attrs.contains("avc1", ignoreCase = true) ||
+                // Both `avc1`/`hvc1` and `av01`/`vp09` are supported by our ISO-BMFF fMP4 de-fragmenting muxer!
+                val isAvcOrHevc = attrs.contains("avc1", ignoreCase = true) ||
                     attrs.contains("hvc1", ignoreCase = true) ||
-                    attrs.contains("hev1", ignoreCase = true) ||
-                    (!attrs.contains("vp09", ignoreCase = true) && !attrs.contains("av01", ignoreCase = true))
-                val codecBonus = if (isMp4MuxCompatible) 80 else -120
+                    attrs.contains("hev1", ignoreCase = true)
+                val codecBonus = if (isAvcOrHevc) 30 else 0
 
-                val res = labelRes ?: shortSide.takeIf { it > 0 } ?: efg.resolutionScore
+                val res = labelRes ?: efg.resolutionScore.takeIf { it > 0 } ?: shortSide
                 val (dashLabel, dashScore) = when {
-                    res >= 1080 -> "Full HD 1080p (MP4)" to (1080 + codecBonus)
-                    res >= 720 -> "HD 720p (MP4)" to (900 + codecBonus)
+                    res >= 1080 -> "Full HD 1080p (MP4)" to (1150 + codecBonus)
+                    res >= 720 -> "HD 720p (MP4)" to (950 + codecBonus)
                     res >= 540 -> "qHD 540p (MP4)" to (540 + codecBonus)
                     res >= 480 -> "SD 480p (MP4)" to (480 + codecBonus)
                     res > 0 -> "SD ${res}p (MP4)" to (res + codecBonus)
-                    attrs.contains("FBQualityClass=\"hd\"", ignoreCase = true) -> "Full HD 1080p/720p (MP4)" to (960 + codecBonus)
+                    attrs.contains("FBQualityClass=\"hd\"", ignoreCase = true) -> "Full HD 1080p/720p (MP4)" to (980 + codecBonus)
                     else -> "SD Video (MP4)" to 360
                 }
                 register(cleanedUrl, dashLabel, dashScore, isTargetSlice, mpdAudioUrl ?: bestDashAudioUrl)
-            }
-        }
-
-        // Also check Relay JSON `"base_url"` audio representations if XML didn't have one
-        val jsonBaseUrlRegex = Regex(""""base_url"\s*:\s*"(https?:[^"]+)"""")
-        val jsonBaseMatches = jsonBaseUrlRegex.findAll(region).toList()
-        for (jm in jsonBaseMatches) {
-            val cleanedUrl = sanitizeCandidateUrl(jm.groupValues[1])
-            val efg = inspectFacebookStreamUrl(cleanedUrl)
-            val start = (jm.range.first - 240).coerceAtLeast(0)
-            val end = (jm.range.last + 240).coerceAtMost(region.length)
-            val ctx = region.substring(start, end)
-            val isAudio = efg.isAudioOnly ||
-                ctx.contains("audio/mp4", ignoreCase = true) ||
-                ctx.contains("mp4a", ignoreCase = true)
-            if (isAudio) {
-                if (bestDashAudioUrl == null) {
-                    bestDashAudioUrl = cleanedUrl
-                }
-                register(cleanedUrl, "Âm thanh gốc (M4A)", 110, isTargetSlice, null)
             }
         }
 
@@ -1197,11 +1219,12 @@ class MultiPlatformExtractor(private val context: Context) {
             val height = Regex(""""height"\s*:\s*(\d+)""").find(ctx)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
             val shortSide = if (width > 0 && height > 0) minOf(width, height) else maxOf(width, height)
             val isAvc1 = ctx.contains("avc1", ignoreCase = true)
-            val codecBonus = if (isAvc1) 35 else 0
-            val res = shortSide.takeIf { it > 0 } ?: efg.resolutionScore
+            val codecBonus = if (isAvc1) 30 else 0
+            val res = efg.resolutionScore.takeIf { it > 0 } ?: shortSide
             if (res >= 720) {
                 val label = if (res >= 1080) "Full HD 1080p (MP4)" else "HD 720p (MP4)"
-                register(cleanedUrl, label, res + codecBonus, isTargetSlice, bestDashAudioUrl)
+                val score = (if (res >= 1080) 1150 else 950) + codecBonus
+                register(cleanedUrl, label, score, isTargetSlice, bestDashAudioUrl)
             }
         }
     }
@@ -1264,7 +1287,25 @@ class MultiPlatformExtractor(private val context: Context) {
                 return
             }
 
-            if (!seenUrls.add(cleaned)) return
+            if (!seenUrls.add(cleaned)) {
+                val existingIdx = candidates.indexOfFirst { it.url == cleaned }
+                if (existingIdx >= 0) {
+                    val existing = candidates[existingIdx]
+                    val bonus = if (isTargetSlice || (targetVideoId != null && efgMeta.videoId == targetVideoId)) 250 else 0
+                    val candidateScore = max(defaultScore, efgMeta.resolutionScore) + bonus
+                    val newAudio = existing.audioUrl ?: pairedAudioUrl
+                    val newScore = max(existing.score, candidateScore)
+                    val newLabel = if (candidateScore > existing.score) defaultLabel else existing.label
+                    if (newAudio != existing.audioUrl || newScore != existing.score) {
+                        candidates[existingIdx] = existing.copy(
+                            label = newLabel,
+                            score = newScore,
+                            audioUrl = newAudio
+                        )
+                    }
+                }
+                return
+            }
 
             if (targetVideoId == null && !efgMeta.videoId.isNullOrBlank()) {
                 targetVideoId = efgMeta.videoId
@@ -1542,6 +1583,8 @@ class MultiPlatformExtractor(private val context: Context) {
             registerCandidateUrl(ogVideoUrl, "HD Video (MP4)", 720, false, null)
         }
 
+        val fallbackDashAudioUrl = candidates.firstOrNull { it.mediaType == MediaType.AUDIO }?.url
+
         val sortedVideoAndAudio = candidates
             .sortedWith(
                 compareByDescending<ScoredStreamCandidate> { it.mediaType == MediaType.VIDEO }
@@ -1557,6 +1600,13 @@ class MultiPlatformExtractor(private val context: Context) {
             } else {
                 false
             }
+            val resolvedAudioUrl = cand.audioUrl ?: if (
+                cand.mediaType == MediaType.VIDEO && isFacebookDashVideoOnlyUrl(cand.url)
+            ) {
+                fallbackDashAudioUrl
+            } else {
+                null
+            }
             options.add(
                 MediaOption(
                     url = cand.url,
@@ -1566,7 +1616,7 @@ class MultiPlatformExtractor(private val context: Context) {
                     isHighestQuality = isHighest,
                     isNoWatermark = true,
                     customHeaders = fbHeaders,
-                    audioUrl = cand.audioUrl
+                    audioUrl = resolvedAudioUrl
                 )
             )
         }
@@ -2028,7 +2078,23 @@ class MultiPlatformExtractor(private val context: Context) {
             val cleaned = sanitizeCandidateUrl(rawCandidateUrl ?: return)
             if (cleaned.isBlank() || cleaned.startsWith("blob:", ignoreCase = true)) return
             if (!cleaned.startsWith("http", ignoreCase = true)) return
-            if (!seenUrls.add(cleaned)) return
+            if (!seenUrls.add(cleaned)) {
+                val existingIdx = candidates.indexOfFirst { it.url == cleaned }
+                if (existingIdx >= 0) {
+                    val existing = candidates[existingIdx]
+                    val newAudio = existing.audioUrl ?: pairedAudioUrl
+                    val newScore = max(existing.score, defaultScore)
+                    val newLabel = if (defaultScore > existing.score) defaultLabel else existing.label
+                    if (newAudio != existing.audioUrl || newScore != existing.score) {
+                        candidates[existingIdx] = existing.copy(
+                            label = newLabel,
+                            score = newScore,
+                            audioUrl = newAudio
+                        )
+                    }
+                }
+                return
+            }
 
             if (mediaType == MediaType.VIDEO) {
                 val efgMeta = inspectFacebookStreamUrl(cleaned)
@@ -2215,6 +2281,8 @@ class MultiPlatformExtractor(private val context: Context) {
                 .thenByDescending { it.score }
         )
 
+        val fallbackDashAudioUrl = candidates.firstOrNull { it.mediaType == MediaType.AUDIO }?.url
+
         var markedHighest = false
         val finalOptions = sortedCandidates.map { cand ->
             val isHighest = if (cand.mediaType == MediaType.VIDEO && !markedHighest) {
@@ -2222,6 +2290,13 @@ class MultiPlatformExtractor(private val context: Context) {
                 true
             } else {
                 false
+            }
+            val resolvedAudioUrl = cand.audioUrl ?: if (
+                cand.mediaType == MediaType.VIDEO && isFacebookDashVideoOnlyUrl(cand.url)
+            ) {
+                fallbackDashAudioUrl
+            } else {
+                null
             }
             MediaOption(
                 url = cand.url,
@@ -2231,7 +2306,7 @@ class MultiPlatformExtractor(private val context: Context) {
                 isHighestQuality = isHighest,
                 isNoWatermark = true,
                 customHeaders = customHeaders,
-                audioUrl = cand.audioUrl
+                audioUrl = resolvedAudioUrl
             )
         }
 

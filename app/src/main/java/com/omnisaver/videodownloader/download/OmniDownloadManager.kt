@@ -22,8 +22,11 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
 
@@ -246,10 +249,19 @@ class OmniDownloadManager(private val context: Context) {
                 )
 
                 if (targetFile.exists()) targetFile.delete()
-                val muxSuccess = if (tempAudioFile.exists() && tempAudioFile.length() > 1024L) {
-                    runCatching {
-                        muxDashVideoAndAudio(tempVideoFile, tempAudioFile, targetFile)
+                val muxSuccess = if (tempAudioFile.exists() && tempAudioFile.length() > 512L) {
+                    val isoSuccess = runCatching {
+                        muxIsoBmffFragmentedMp4(tempVideoFile, tempAudioFile, targetFile)
                     }.getOrDefault(false)
+
+                    if (isoSuccess && targetFile.exists() && targetFile.length() > tempVideoFile.length()) {
+                        true
+                    } else {
+                        if (targetFile.exists()) targetFile.delete()
+                        runCatching {
+                            muxDashVideoAndAudio(tempVideoFile, tempAudioFile, targetFile)
+                        }.getOrDefault(false)
+                    }
                 } else {
                     false
                 }
@@ -459,5 +471,495 @@ class OmniDownloadManager(private val context: Context) {
             runCatching { videoExtractor.release() }
             runCatching { audioExtractor.release() }
         }
+    }
+
+
+    private class Fmp4ChunkRun(
+        val sourceOffset: Long,
+        val byteLength: Int,
+        val sampleCount: Int
+    )
+
+    private class ParsedFmp4Track {
+        var ftypBox: ByteArray? = null
+        var mvhdBox: ByteArray? = null
+        var tkhdBox: ByteArray? = null
+        var mdhdBox: ByteArray? = null
+        var hdlrBox: ByteArray? = null
+        var mediaHeaderBox: ByteArray? = null
+        var dinfBox: ByteArray? = null
+        var stsdBox: ByteArray? = null
+        var mvhdTimescale: Long = 0L
+        var mdhdTimescale: Long = 0L
+        var defaultSampleDescIndex: Long = 1L
+        var defaultSampleDuration: Long = 0L
+        var defaultSampleSize: Long = 0L
+        var defaultSampleFlags: Long = 0L
+        val sampleDurations = ArrayList<Long>()
+        val sampleSizes = ArrayList<Long>()
+        val sampleFlags = ArrayList<Long>()
+        val sampleCtsOffsets = ArrayList<Int>()
+        val chunks = ArrayList<Fmp4ChunkRun>()
+        var totalDuration: Long = 0L
+        var totalDataBytes: Long = 0L
+    }
+
+    /**
+     * Codec-agnostic ISO-BMFF Fragmented MP4 (fMP4 / CMAF) De-fragmenting & Track Muxer.
+     * Combines a DASH Video fMP4 (`av01` AV1, `vp09` VP9, `avc1` H.264, `hvc1` HEVC)
+     * and a DASH Audio fMP4 (`mp4a.40.5` HE-AAC, `mp4a.40.2` AAC-LC, `opus`)
+     * directly into a universal non-fragmented `.mp4` (`ftyp` + `moov` + `mdat`)
+     * with complete `stts`, `ctts`, `stss`, `stsc`, `stsz`, `stco` sample tables.
+     */
+    private fun muxIsoBmffFragmentedMp4(videoFile: File, audioFile: File, outputFile: File): Boolean {
+        val v = parseFmp4File(videoFile)
+        val a = parseFmp4File(audioFile)
+
+        val ftyp = v.ftypBox ?: return false
+        val vMvhd = v.mvhdBox ?: return false
+        if (v.tkhdBox == null || v.mdhdBox == null || v.hdlrBox == null || v.mediaHeaderBox == null || v.dinfBox == null || v.stsdBox == null) return false
+        if (a.tkhdBox == null || a.mdhdBox == null || a.hdlrBox == null || a.mediaHeaderBox == null || a.dinfBox == null || a.stsdBox == null) return false
+        if (v.chunks.isEmpty() || a.chunks.isEmpty()) return false
+
+        val mvhdScale = when {
+            v.mvhdTimescale > 0L -> v.mvhdTimescale
+            v.mdhdTimescale > 0L -> v.mdhdTimescale
+            else -> 1000L
+        }
+        val mvhdDur = if (v.mdhdTimescale > 0L) {
+            (v.totalDuration * mvhdScale) / v.mdhdTimescale
+        } else {
+            v.totalDuration
+        }
+
+        val mvhd = vMvhd.clone()
+        val mvhdVer = mvhd[8].toInt() and 0xFF
+        if (mvhdVer == 1 && mvhd.size >= 40) {
+            writeU64(mvhd, 32, mvhdDur)
+        } else if (mvhd.size >= 28) {
+            writeU32(mvhd, 24, mvhdDur)
+        }
+        writeU32(mvhd, mvhd.size - 4, 3L) // next_track_ID = 3
+
+        val dummyVOffsets = LongArray(v.chunks.size)
+        val dummyAOffsets = LongArray(a.chunks.size)
+        val dummyMoov = makeMp4Box(
+            "moov",
+            combineMp4Boxes(
+                mvhd,
+                buildStandardTrakBox(v, 1L, mvhdScale, dummyVOffsets, isVideo = true),
+                buildStandardTrakBox(a, 2L, mvhdScale, dummyAOffsets, isVideo = false)
+            )
+        )
+
+        val mdatDataStart = (ftyp.size + dummyMoov.size + 8).toLong()
+        val realVOffsets = LongArray(v.chunks.size)
+        var curOffset = mdatDataStart
+        for (i in v.chunks.indices) {
+            realVOffsets[i] = curOffset
+            curOffset += v.chunks[i].byteLength.toLong()
+        }
+        val realAOffsets = LongArray(a.chunks.size)
+        for (i in a.chunks.indices) {
+            realAOffsets[i] = curOffset
+            curOffset += a.chunks[i].byteLength.toLong()
+        }
+
+        val finalMoov = makeMp4Box(
+            "moov",
+            combineMp4Boxes(
+                mvhd,
+                buildStandardTrakBox(v, 1L, mvhdScale, realVOffsets, isVideo = true),
+                buildStandardTrakBox(a, 2L, mvhdScale, realAOffsets, isVideo = false)
+            )
+        )
+
+        FileOutputStream(outputFile).use { out ->
+            out.write(ftyp)
+            out.write(finalMoov)
+
+            val mdatHeader = ByteArray(8)
+            val mdatTotalSize = 8L + v.totalDataBytes + a.totalDataBytes
+            writeU32(mdatHeader, 0, mdatTotalSize)
+            mdatHeader[4] = 'm'.code.toByte()
+            mdatHeader[5] = 'd'.code.toByte()
+            mdatHeader[6] = 'a'.code.toByte()
+            mdatHeader[7] = 't'.code.toByte()
+            out.write(mdatHeader)
+
+            val buf = ByteArray(64 * 1024)
+            RandomAccessFile(videoFile, "r").use { vRaf ->
+                for (ch in v.chunks) {
+                    vRaf.seek(ch.sourceOffset)
+                    var rem = ch.byteLength
+                    while (rem > 0) {
+                        val r = vRaf.read(buf, 0, minOf(buf.size, rem))
+                        if (r <= 0) break
+                        out.write(buf, 0, r)
+                        rem -= r
+                    }
+                }
+            }
+            RandomAccessFile(audioFile, "r").use { aRaf ->
+                for (ch in a.chunks) {
+                    aRaf.seek(ch.sourceOffset)
+                    var rem = ch.byteLength
+                    while (rem > 0) {
+                        val r = aRaf.read(buf, 0, minOf(buf.size, rem))
+                        if (r <= 0) break
+                        out.write(buf, 0, r)
+                        rem -= r
+                    }
+                }
+            }
+            out.flush()
+        }
+
+        return outputFile.exists() && outputFile.length() > (videoFile.length() + 1024L)
+    }
+
+    private fun parseFmp4File(file: File): ParsedFmp4Track {
+        val t = ParsedFmp4Track()
+        RandomAccessFile(file, "r").use { raf ->
+            val hdr = ByteArray(16)
+            val fileLen = raf.length()
+            var pos = 0L
+            while (pos + 8L <= fileLen) {
+                raf.seek(pos)
+                if (raf.read(hdr, 0, 8) != 8) break
+                var sz = readU32(hdr, 0)
+                val type = String(hdr, 4, 4, Charsets.US_ASCII)
+                if (sz == 1L) {
+                    if (raf.read(hdr, 8, 8) != 8) break
+                    sz = readU64(hdr, 8)
+                }
+                if (sz < 8L || pos + sz > fileLen) break
+
+                when (type) {
+                    "ftyp" -> {
+                        if (sz <= 4096L) {
+                            val b = ByteArray(sz.toInt())
+                            raf.seek(pos)
+                            raf.readFully(b)
+                            t.ftypBox = b
+                        }
+                    }
+                    "moov" -> {
+                        if (sz <= 4 * 1024 * 1024L) {
+                            val b = ByteArray(sz.toInt())
+                            raf.seek(pos)
+                            raf.readFully(b)
+                            parseMoovBox(b, 8, b.size, t)
+                        }
+                    }
+                    "moof" -> {
+                        if (sz <= 2 * 1024 * 1024L) {
+                            val b = ByteArray(sz.toInt())
+                            raf.seek(pos)
+                            raf.readFully(b)
+                            parseMoofBox(b, pos, b.size, t)
+                        }
+                    }
+                }
+                pos += sz
+            }
+        }
+        return t
+    }
+
+    private fun parseMoovBox(moov: ByteArray, offset: Int, end: Int, t: ParsedFmp4Track) {
+        var pos = offset
+        while (pos + 8 <= end) {
+            val sz = readU32(moov, pos).toInt()
+            val type = String(moov, pos + 4, 4, Charsets.US_ASCII)
+            if (sz < 8 || pos + sz > end) break
+            val boxEnd = pos + sz
+            when (type) {
+                "mvhd" -> {
+                    t.mvhdBox = moov.copyOfRange(pos, boxEnd)
+                    val ver = moov[pos + 8].toInt() and 0xFF
+                    t.mvhdTimescale = if (ver == 1 && sz >= 32) readU32(moov, pos + 28) else readU32(moov, pos + 20)
+                }
+                "tkhd" -> t.tkhdBox = moov.copyOfRange(pos, boxEnd)
+                "mdhd" -> {
+                    t.mdhdBox = moov.copyOfRange(pos, boxEnd)
+                    val ver = moov[pos + 8].toInt() and 0xFF
+                    t.mdhdTimescale = if (ver == 1 && sz >= 32) readU32(moov, pos + 28) else readU32(moov, pos + 20)
+                }
+                "hdlr" -> if (t.hdlrBox == null) t.hdlrBox = moov.copyOfRange(pos, boxEnd)
+                "vmhd", "smhd" -> t.mediaHeaderBox = moov.copyOfRange(pos, boxEnd)
+                "dinf" -> t.dinfBox = moov.copyOfRange(pos, boxEnd)
+                "stsd" -> t.stsdBox = moov.copyOfRange(pos, boxEnd)
+                "trex" -> {
+                    if (sz >= 32) {
+                        t.defaultSampleDescIndex = readU32(moov, pos + 16)
+                        t.defaultSampleDuration = readU32(moov, pos + 20)
+                        t.defaultSampleSize = readU32(moov, pos + 24)
+                        t.defaultSampleFlags = readU32(moov, pos + 28)
+                    }
+                }
+                "trak", "mdia", "minf", "stbl", "mvex" -> parseMoovBox(moov, pos + 8, boxEnd, t)
+            }
+            pos = boxEnd
+        }
+    }
+
+    private fun parseMoofBox(moof: ByteArray, moofFileOffset: Long, moofSize: Int, t: ParsedFmp4Track) {
+        var pos = 8
+        while (pos + 8 <= moofSize) {
+            val sz = readU32(moof, pos).toInt()
+            val type = String(moof, pos + 4, 4, Charsets.US_ASCII)
+            if (sz < 8 || pos + sz > moofSize) break
+            if (type == "traf") {
+                var c = pos + 8
+                val trafEnd = pos + sz
+                var baseDataOffset = moofFileOffset
+                var defDur = t.defaultSampleDuration
+                var defSize = t.defaultSampleSize
+                var defFlags = t.defaultSampleFlags
+
+                while (c + 8 <= trafEnd) {
+                    val sSz = readU32(moof, c).toInt()
+                    val sType = String(moof, c + 4, 4, Charsets.US_ASCII)
+                    if (sSz < 8 || c + sSz > trafEnd) break
+                    val flags = ((moof[c + 9].toInt() and 0xFF) shl 16) or
+                        ((moof[c + 10].toInt() and 0xFF) shl 8) or
+                        (moof[c + 11].toInt() and 0xFF)
+
+                    if (sType == "tfhd") {
+                        var p = c + 16
+                        if ((flags and 0x01) != 0) { baseDataOffset = readU64(moof, p); p += 8 }
+                        if ((flags and 0x02) != 0) { p += 4 }
+                        if ((flags and 0x08) != 0) { defDur = readU32(moof, p); p += 4 }
+                        if ((flags and 0x10) != 0) { defSize = readU32(moof, p); p += 4 }
+                        if ((flags and 0x20) != 0) { defFlags = readU32(moof, p); p += 4 }
+                    } else if (sType == "trun") {
+                        val sc = readU32(moof, c + 12).toInt()
+                        var p = c + 16
+                        var dataOff = moofSize + 8
+                        if ((flags and 0x01) != 0) { dataOff = readI32(moof, p); p += 4 }
+                        var firstFlags = defFlags
+                        if ((flags and 0x04) != 0) { firstFlags = readU32(moof, p); p += 4 }
+
+                        var chunkBytes = 0
+                        for (i in 0 until sc) {
+                            val dur = if ((flags and 0x100) != 0) readU32(moof, p).also { p += 4 } else defDur
+                            val smpSz = if ((flags and 0x200) != 0) readU32(moof, p).also { p += 4 } else defSize
+                            val smpFl = if ((flags and 0x400) != 0) readU32(moof, p).also { p += 4 } else if (i == 0) firstFlags else defFlags
+                            val cts = if ((flags and 0x800) != 0) readI32(moof, p).also { p += 4 } else 0
+
+                            t.sampleDurations.add(dur)
+                            t.sampleSizes.add(smpSz)
+                            t.sampleFlags.add(smpFl)
+                            t.sampleCtsOffsets.add(cts)
+                            t.totalDuration += dur
+                            chunkBytes += smpSz.toInt()
+                        }
+                        if (sc > 0 && chunkBytes > 0) {
+                            t.chunks.add(
+                                Fmp4ChunkRun(
+                                    sourceOffset = baseDataOffset + dataOff.toLong(),
+                                    byteLength = chunkBytes,
+                                    sampleCount = sc
+                                )
+                            )
+                            t.totalDataBytes += chunkBytes.toLong()
+                        }
+                    }
+                    c += sSz
+                }
+            }
+            pos += sz
+        }
+    }
+
+    private fun buildStandardTrakBox(
+        t: ParsedFmp4Track,
+        trackId: Long,
+        mvhdTimescale: Long,
+        chunkOffsets: LongArray,
+        isVideo: Boolean
+    ): ByteArray {
+        val tkhd = t.tkhdBox!!.clone()
+        val tkhdVer = tkhd[8].toInt() and 0xFF
+        tkhd[9] = 0
+        tkhd[10] = 0
+        tkhd[11] = 3 // track_enabled | track_in_movie
+        val scaledDur = if (t.mdhdTimescale > 0L) (t.totalDuration * mvhdTimescale) / t.mdhdTimescale else t.totalDuration
+        if (tkhdVer == 1 && tkhd.size >= 44) {
+            writeU32(tkhd, 28, trackId)
+            writeU64(tkhd, 36, scaledDur)
+        } else if (tkhd.size >= 32) {
+            writeU32(tkhd, 20, trackId)
+            writeU32(tkhd, 28, scaledDur)
+        }
+
+        val mdhd = t.mdhdBox!!.clone()
+        val mdhdVer = mdhd[8].toInt() and 0xFF
+        if (mdhdVer == 1 && mdhd.size >= 40) {
+            writeU64(mdhd, 32, t.totalDuration)
+        } else if (mdhd.size >= 28) {
+            writeU32(mdhd, 24, t.totalDuration)
+        }
+
+        val stts = buildSttsBox(t.sampleDurations)
+        val ctts = buildCttsBox(t.sampleCtsOffsets)
+        val stss = if (isVideo) buildStssBox(t.sampleFlags) else ByteArray(0)
+        val stsc = buildStscBox(t.chunks)
+        val stsz = buildStszBox(t.sampleSizes)
+        val stco = buildStcoBox(chunkOffsets)
+
+        val stbl = makeMp4Box("stbl", combineMp4Boxes(t.stsdBox!!, stts, ctts, stss, stsc, stsz, stco))
+        val minf = makeMp4Box("minf", combineMp4Boxes(t.mediaHeaderBox!!, t.dinfBox!!, stbl))
+        val mdia = makeMp4Box("mdia", combineMp4Boxes(mdhd, t.hdlrBox!!, minf))
+        return makeMp4Box("trak", combineMp4Boxes(tkhd, mdia))
+    }
+
+    private fun buildSttsBox(durations: List<Long>): ByteArray {
+        val counts = ArrayList<Long>()
+        val deltas = ArrayList<Long>()
+        for (d in durations) {
+            if (deltas.isNotEmpty() && deltas[deltas.size - 1] == d) {
+                counts[counts.size - 1] = counts[counts.size - 1] + 1L
+            } else {
+                counts.add(1L)
+                deltas.add(d)
+            }
+        }
+        val out = ByteArrayOutputStream(16 + counts.size * 8)
+        writeU32Stream(out, 0L)
+        writeU32Stream(out, counts.size.toLong())
+        for (i in counts.indices) {
+            writeU32Stream(out, counts[i])
+            writeU32Stream(out, deltas[i])
+        }
+        return makeMp4Box("stts", out.toByteArray())
+    }
+
+    private fun buildCttsBox(offsets: List<Int>): ByteArray {
+        var hasNonZero = false
+        var hasNegative = false
+        for (o in offsets) {
+            if (o != 0) hasNonZero = true
+            if (o < 0) hasNegative = true
+        }
+        if (!hasNonZero) return ByteArray(0)
+        val counts = ArrayList<Long>()
+        val vals = ArrayList<Int>()
+        for (o in offsets) {
+            if (vals.isNotEmpty() && vals[vals.size - 1] == o) {
+                counts[counts.size - 1] = counts[counts.size - 1] + 1L
+            } else {
+                counts.add(1L)
+                vals.add(o)
+            }
+        }
+        val out = ByteArrayOutputStream(16 + counts.size * 8)
+        writeU32Stream(out, if (hasNegative) 0x01000000L else 0L)
+        writeU32Stream(out, counts.size.toLong())
+        for (i in counts.indices) {
+            writeU32Stream(out, counts[i])
+            writeU32Stream(out, vals[i].toLong() and 0xFFFFFFFFL)
+        }
+        return makeMp4Box("ctts", out.toByteArray())
+    }
+
+    private fun buildStssBox(flags: List<Long>): ByteArray {
+        val syncs = ArrayList<Long>()
+        for (i in flags.indices) {
+            if ((flags[i] and 0x00010000L) == 0L) {
+                syncs.add((i + 1).toLong())
+            }
+        }
+        if (syncs.isEmpty() || syncs.size == flags.size) return ByteArray(0)
+        val out = ByteArrayOutputStream(16 + syncs.size * 4)
+        writeU32Stream(out, 0L)
+        writeU32Stream(out, syncs.size.toLong())
+        for (s in syncs) writeU32Stream(out, s)
+        return makeMp4Box("stss", out.toByteArray())
+    }
+
+    private fun buildStscBox(chunks: List<Fmp4ChunkRun>): ByteArray {
+        val out = ByteArrayOutputStream(16 + chunks.size * 12)
+        writeU32Stream(out, 0L)
+        writeU32Stream(out, chunks.size.toLong())
+        for (i in chunks.indices) {
+            writeU32Stream(out, (i + 1).toLong())
+            writeU32Stream(out, chunks[i].sampleCount.toLong())
+            writeU32Stream(out, 1L)
+        }
+        return makeMp4Box("stsc", out.toByteArray())
+    }
+
+    private fun buildStszBox(sizes: List<Long>): ByteArray {
+        val out = ByteArrayOutputStream(20 + sizes.size * 4)
+        writeU32Stream(out, 0L)
+        writeU32Stream(out, 0L)
+        writeU32Stream(out, sizes.size.toLong())
+        for (s in sizes) writeU32Stream(out, s)
+        return makeMp4Box("stsz", out.toByteArray())
+    }
+
+    private fun buildStcoBox(chunkOffsets: LongArray): ByteArray {
+        val out = ByteArrayOutputStream(16 + chunkOffsets.size * 4)
+        writeU32Stream(out, 0L)
+        writeU32Stream(out, chunkOffsets.size.toLong())
+        for (o in chunkOffsets) writeU32Stream(out, o)
+        return makeMp4Box("stco", out.toByteArray())
+    }
+
+    private fun makeMp4Box(type: String, payload: ByteArray): ByteArray {
+        val res = ByteArray(8 + payload.size)
+        writeU32(res, 0, res.size.toLong())
+        val t = type.toByteArray(Charsets.US_ASCII)
+        System.arraycopy(t, 0, res, 4, 4)
+        System.arraycopy(payload, 0, res, 8, payload.size)
+        return res
+    }
+
+    private fun combineMp4Boxes(vararg boxes: ByteArray): ByteArray {
+        var total = 0
+        for (b in boxes) total += b.size
+        val res = ByteArray(total)
+        var pos = 0
+        for (b in boxes) {
+            if (b.isNotEmpty()) {
+                System.arraycopy(b, 0, res, pos, b.size)
+                pos += b.size
+            }
+        }
+        return res
+    }
+
+    private fun readU32(b: ByteArray, o: Int): Long {
+        return ((b[o].toLong() and 0xFFL) shl 24) or
+            ((b[o + 1].toLong() and 0xFFL) shl 16) or
+            ((b[o + 2].toLong() and 0xFFL) shl 8) or
+            (b[o + 3].toLong() and 0xFFL)
+    }
+
+    private fun readI32(b: ByteArray, o: Int): Int = readU32(b, o).toInt()
+
+    private fun readU64(b: ByteArray, o: Int): Long {
+        return (readU32(b, o) shl 32) or (readU32(b, o + 4) and 0xFFFFFFFFL)
+    }
+
+    private fun writeU32(b: ByteArray, o: Int, v: Long) {
+        b[o] = ((v ushr 24) and 0xFFL).toByte()
+        b[o + 1] = ((v ushr 16) and 0xFFL).toByte()
+        b[o + 2] = ((v ushr 8) and 0xFFL).toByte()
+        b[o + 3] = (v and 0xFFL).toByte()
+    }
+
+    private fun writeU64(b: ByteArray, o: Int, v: Long) {
+        writeU32(b, o, v ushr 32)
+        writeU32(b, o + 4, v and 0xFFFFFFFFL)
+    }
+
+    private fun writeU32Stream(out: ByteArrayOutputStream, v: Long) {
+        out.write(((v ushr 24) and 0xFFL).toInt())
+        out.write(((v ushr 16) and 0xFFL).toInt())
+        out.write(((v ushr 8) and 0xFFL).toInt())
+        out.write((v and 0xFFL).toInt())
     }
 }
