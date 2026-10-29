@@ -1,0 +1,64 @@
+name: OmniSaverIOS
+options:
+  bundleIdPrefix: com.omnisaver
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_BITCODE: NO
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+
+targets:
+  OmniSaverIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: OmniSaverIOS
+    info:
+      path: OmniSaverIOS/Info.plist
+      properties:
+        CFBundleDisplayName: OmniSaver
+        CFBundleName: OmniSaver
+        CFBundleIdentifier: com.omnisaver.videodownloader.ios
+        CFBundleShortVersionString: "2.4.0"
+        CFBundleVersion: "7"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen:
+          UIColorName: ""
+          UIImageName: ""
+        UIApplicationSupportsIndirectInputEvents: true
+        UIViewControllerBasedStatusBarAppearance: true
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSPhotoLibraryAddUsageDescription: "OmniSaver cần quyền thêm video Full HD 1080p và ảnh vừa tải vào Thư viện Ảnh của thiết bị."
+        NSPhotoLibraryUsageDescription: "OmniSaver cần quyền truy cập Thư viện Ảnh để lưu các video đã tải về máy."
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.omnisaver.videodownloader.ios
+        PRODUCT_NAME: OmniSaverIOS
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: OmniSaverIOS/Info.plist
+        SWIFT_EMIT_LOC_STRINGS: NO

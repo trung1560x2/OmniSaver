@@ -1,0 +1,77 @@
+name: Build iOS Liquid Glass IPA
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/build-ios-ipa.yml'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'GitHub Release tag to attach the IPA to (e.g. v2.4.0-FullHD)'
+        required: false
+        default: 'v2.4.0-FullHD'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen & ldid
+        run: |
+          brew install xcodegen ldid
+
+      - name: Generate Xcode Project
+        working-directory: ios
+        run: |
+          xcodegen generate
+
+      - name: Build OmniSaverIOS Release (.app)
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project OmniSaverIOS.xcodeproj \
+            -scheme OmniSaverIOS \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package & Pseudo-Sign IPA (Sideloadly / AltStore / SideStore / TrollStore / ESign Ready)
+        working-directory: ios
+        run: |
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -name "OmniSaverIOS.app" | head -n 1)
+          echo "Found built app at: $APP_PATH"
+          ldid -S "$APP_PATH/OmniSaverIOS" || true
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/OmniSaverIOS.app
+          zip -qry OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa Payload
+          ls -lh OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniSaver_iOS27_LiquidGlass_v2.4_FullHD_IPA
+          path: ios/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa
+          if-no-files-found: error
+
+      - name: Attach IPA to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v2.4.0-FullHD"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" ios/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa --clobber
+          fi
