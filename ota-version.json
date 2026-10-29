@@ -2,6 +2,7 @@
     "versionCode":  7,
     "versionName":  "2.4.0-FullHD",
     "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.4.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.apk",
+    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.4.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa",
     "changelog":  "• Sửa triệt để lỗi tải video Facebook Full HD 1080p không có âm thanh (tích hợp bộ ghép kênh ISO-BMFF Fragmented MP4 Muxer hỗ trợ mọi chuẩn nén video AV1 av01, VP9 vp09, H.264 avc1, HEVC hvc1 kèm âm thanh gốc HE-AAC mp4a.40.5)\n• Đảm bảo mọi luồng video DASH 1080p / 720p luôn tự động gắn kèm luồng âm thanh gốc M4A khi tải về\n• Nâng cấp giải mã chuẩn chất lượng NextGen DASH (_q90 = 1080p, _q80 = 720p) chính xác 100%",
     "publishedAt":  "2026-10-28",
     "fileSizeBytes":  5366074,
