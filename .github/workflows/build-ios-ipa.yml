@@ -18,14 +18,20 @@ permissions:
 
 jobs:
   build-ipa:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install XcodeGen & ldid
+      - name: Ensure XcodeGen is installed
         run: |
-          brew install xcodegen ldid
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            curl -sL https://github.com/yonaskolb/XcodeGen/releases/download/2.42.0/xcodegen.zip -o xcodegen.zip
+            unzip -q xcodegen.zip
+            sudo cp xcodegen/bin/xcodegen /usr/local/bin/xcodegen
+            sudo chmod +x /usr/local/bin/xcodegen
+          fi
+          xcodegen --version
 
       - name: Generate Xcode Project
         working-directory: ios
@@ -46,12 +52,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Package & Pseudo-Sign IPA (Sideloadly / AltStore / SideStore / TrollStore / ESign Ready)
+      - name: Package & Ad-Hoc Sign IPA (Sideloadly / AltStore / SideStore / TrollStore / ESign Ready)
         working-directory: ios
         run: |
           APP_PATH=$(find build/Build/Products/Release-iphoneos -name "OmniSaverIOS.app" | head -n 1)
           echo "Found built app at: $APP_PATH"
-          ldid -S "$APP_PATH/OmniSaverIOS" || true
+          codesign --force --deep --sign - "$APP_PATH" || true
+          rm -rf Payload
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/OmniSaverIOS.app
           zip -qry OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa Payload
