@@ -103,6 +103,76 @@ final class OmniDownloadManager: ObservableObject {
             isDownloading = false
         }
 
+        let item = try await performSingleDownload(
+            mediaInfo: mediaInfo,
+            option: option,
+            statusPrefix: "",
+            progressStart: 0.0,
+            progressSpan: 1.0
+        )
+
+        progress = 1.0
+        statusMessage = item.savedToPhotos
+            ? "Đã tải xong & lưu vào Thư viện Ảnh!"
+            : "Đã tải xong vào thư mục OmniSaver!"
+
+        return item
+    }
+
+    func startDownloadBatch(mediaInfo: ExtractedMediaInfo, options: [MediaOption]) async throws -> [DownloadedItem] {
+        guard !options.isEmpty else {
+            throw NSError(
+                domain: "OmniDownloadManager",
+                code: -4,
+                userInfo: [NSLocalizedDescriptionKey: "Không có mục nào trong danh sách tải hàng loạt."]
+            )
+        }
+
+        ensureDownloadsDirectoryExists()
+        isDownloading = true
+        progress = 0.01
+        statusMessage = "Đang chuẩn bị tải trọn bộ \(options.count) Story / Video..."
+
+        defer {
+            isDownloading = false
+        }
+
+        var downloadedBatch: [DownloadedItem] = []
+        let totalCount = options.count
+        let spanPerItem = 1.0 / Double(totalCount)
+
+        for (idx, option) in options.enumerated() {
+            let prefix = "[Story \(idx + 1)/\(totalCount)] "
+            let startFrac = Double(idx) * spanPerItem
+            statusMessage = "\(prefix)Đang tải \(option.qualityLabel)..."
+            progress = max(0.01, startFrac)
+
+            let item = try await performSingleDownload(
+                mediaInfo: mediaInfo,
+                option: option,
+                statusPrefix: prefix,
+                progressStart: startFrac,
+                progressSpan: spanPerItem
+            )
+            downloadedBatch.append(item)
+        }
+
+        progress = 1.0
+        let savedCount = downloadedBatch.filter { $0.savedToPhotos }.count
+        statusMessage = savedCount > 0
+            ? "Đã tải trọn bộ \(downloadedBatch.count)/\(totalCount) mục & lưu vào Thư viện Ảnh!"
+            : "Đã tải trọn bộ \(downloadedBatch.count)/\(totalCount) mục vào OmniSaver!"
+
+        return downloadedBatch
+    }
+
+    private func performSingleDownload(
+        mediaInfo: ExtractedMediaInfo,
+        option: MediaOption,
+        statusPrefix: String,
+        progressStart: Double,
+        progressSpan: Double
+    ) async throws -> DownloadedItem {
         let safeFileName = buildSafeFileName(mediaInfo: mediaInfo, option: option)
         let finalFile = downloadsDirectory.appendingPathComponent(safeFileName)
         let fm = FileManager.default
@@ -123,8 +193,8 @@ final class OmniDownloadManager: ObservableObject {
                 try? fm.removeItem(at: tempAudio)
             }
 
-            // 1. Download Video stream (0% -> 72%)
-            statusMessage = "Đang tải luồng Video \(option.qualityLabel)..."
+            // 1. Download Video stream (0% -> 72% of span)
+            statusMessage = "\(statusPrefix)Đang tải luồng Video \(option.qualityLabel)..."
             let videoRequest = try buildConfiguredRequest(
                 urlString: option.url,
                 platform: mediaInfo.platform,
@@ -133,13 +203,14 @@ final class OmniDownloadManager: ObservableObject {
             try await downloadFileWithProgress(request: videoRequest, destination: tempVideo) { [weak self] frac in
                 Task { @MainActor in
                     guard let self = self else { return }
-                    self.progress = min(0.72, max(0.02, frac * 0.72))
+                    let localProgress = min(0.72, max(0.02, frac * 0.72))
+                    self.progress = min(0.99, progressStart + localProgress * progressSpan)
                 }
             }
 
-            // 2. Download Audio stream (72% -> 90%)
-            statusMessage = "Đang tải luồng âm thanh gốc M4A..."
-            progress = 0.73
+            // 2. Download Audio stream (72% -> 90% of span)
+            statusMessage = "\(statusPrefix)Đang tải luồng âm thanh gốc M4A..."
+            progress = min(0.99, progressStart + 0.73 * progressSpan)
             var audioDownloadedOk = false
             if let audioRequest = try? buildConfiguredRequest(
                 urlString: pairedAudioUrl,
@@ -150,7 +221,8 @@ final class OmniDownloadManager: ObservableObject {
                     try await downloadFileWithProgress(request: audioRequest, destination: tempAudio) { [weak self] frac in
                         Task { @MainActor in
                             guard let self = self else { return }
-                            self.progress = min(0.90, max(0.72, 0.72 + frac * 0.18))
+                            let localProgress = min(0.90, max(0.72, 0.72 + frac * 0.18))
+                            self.progress = min(0.99, progressStart + localProgress * progressSpan)
                         }
                     }
                     audioDownloadedOk = fm.fileExists(atPath: tempAudio.path) && fileSize(at: tempAudio) > 512
@@ -159,9 +231,9 @@ final class OmniDownloadManager: ObservableObject {
                 }
             }
 
-            // 3. Mux Video + Audio via IsoBmffMp4Muxer (90% -> 97%)
-            progress = 0.91
-            statusMessage = "Đang ghép kênh Video Full HD + Âm thanh gốc..."
+            // 3. Mux Video + Audio via IsoBmffMp4Muxer (90% -> 97% of span)
+            progress = min(0.99, progressStart + 0.91 * progressSpan)
+            statusMessage = "\(statusPrefix)Đang ghép kênh Video Full HD + Âm thanh gốc..."
             var muxedOk = false
             if audioDownloadedOk {
                 muxedOk = await IsoBmffMp4Muxer.muxVideoAndAudio(
@@ -175,16 +247,16 @@ final class OmniDownloadManager: ObservableObject {
                 try? fm.removeItem(at: finalFile)
                 try fm.copyItem(at: tempVideo, to: finalFile)
             }
-            progress = 0.97
+            progress = min(0.99, progressStart + 0.97 * progressSpan)
         } else {
-            // Single stream download (0% -> 95%)
+            // Single stream download (0% -> 95% of span)
             let uniqueToken = UUID().uuidString.prefix(8)
             let tempSingle = tempDir.appendingPathComponent("single_\(uniqueToken).\(option.fileExtension)")
             defer {
                 try? fm.removeItem(at: tempSingle)
             }
 
-            statusMessage = "Đang tải \(option.qualityLabel)..."
+            statusMessage = "\(statusPrefix)Đang tải \(option.qualityLabel)..."
             let request = try buildConfiguredRequest(
                 urlString: option.url,
                 platform: mediaInfo.platform,
@@ -193,13 +265,14 @@ final class OmniDownloadManager: ObservableObject {
             try await downloadFileWithProgress(request: request, destination: tempSingle) { [weak self] frac in
                 Task { @MainActor in
                     guard let self = self else { return }
-                    self.progress = min(0.95, max(0.02, frac * 0.95))
+                    let localProgress = min(0.95, max(0.02, frac * 0.95))
+                    self.progress = min(0.99, progressStart + localProgress * progressSpan)
                 }
             }
 
             try? fm.removeItem(at: finalFile)
             try fm.moveItem(at: tempSingle, to: finalFile)
-            progress = 0.97
+            progress = min(0.99, progressStart + 0.97 * progressSpan)
         }
 
         let finalSize = fileSize(at: finalFile)
@@ -211,15 +284,36 @@ final class OmniDownloadManager: ObservableObject {
             )
         }
 
-        // 4. Save to iOS Photos Library if Video or Image (97% -> 100%)
-        statusMessage = "Đang lưu vào Thư viện Ảnh..."
+        // 4. Save to iOS Photos Library if Video or Image (97% -> 100% of span)
+        statusMessage = "\(statusPrefix)Đang lưu vào Thư viện Ảnh..."
         let savedToPhotos = await saveToPhotoLibraryIfApplicable(fileURL: finalFile, mediaType: option.mediaType)
+
+        let baseTitle = mediaInfo.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "\(mediaInfo.platform.displayName) Video"
+            : mediaInfo.title
+
+        let resolvedItemTitle: String = {
+            let pattern = #"^((?:Story|Slide|Video|Ảnh\s*Slide)\s*#\d+)"#
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+               let match = regex.firstMatch(
+                   in: option.qualityLabel,
+                   options: [],
+                   range: NSRange(option.qualityLabel.startIndex..<option.qualityLabel.endIndex, in: option.qualityLabel)
+               ),
+               let prefixRange = Range(match.range(at: 1), in: option.qualityLabel) {
+                let tagPrefix = String(option.qualityLabel[prefixRange])
+                let lowerBase = baseTitle.lowercased()
+                let lowerTag = tagPrefix.lowercased()
+                if !lowerBase.hasPrefix(lowerTag + " ") && !lowerBase.hasPrefix(lowerTag + "/") && lowerBase != lowerTag {
+                    return "\(tagPrefix) • \(baseTitle)"
+                }
+            }
+            return baseTitle
+        }()
 
         let item = DownloadedItem(
             id: UUID().uuidString,
-            title: mediaInfo.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? "\(mediaInfo.platform.displayName) Video"
-                : mediaInfo.title,
+            title: resolvedItemTitle,
             platformName: mediaInfo.platform.displayName,
             qualityLabel: option.qualityLabel,
             fileName: safeFileName,
@@ -233,21 +327,52 @@ final class OmniDownloadManager: ObservableObject {
         downloadedItems.insert(item, at: 0)
         persistHistory()
 
-        progress = 1.0
-        statusMessage = savedToPhotos
-            ? "Đã tải xong & lưu vào Thư viện Ảnh!"
-            : "Đã tải xong vào thư mục OmniSaver!"
-
         return item
     }
 
     // MARK: - Helpers
 
+    private func extractStreamUniqueToken(from urlString: String) -> String {
+        if let regex = try? NSRegularExpression(pattern: #"[?&]efg=([^&"'\s]+)"#, options: []),
+           let match = regex.firstMatch(
+               in: urlString,
+               options: [],
+               range: NSRange(urlString.startIndex..<urlString.endIndex, in: urlString)
+           ),
+           match.numberOfRanges >= 2,
+           let efgRange = Range(match.range(at: 1), in: urlString) {
+            let rawEfg = String(urlString[efgRange])
+            let urlDecoded = rawEfg.removingPercentEncoding ?? rawEfg
+            var base64 = urlDecoded
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            let rem = base64.count % 4
+            if rem > 0 {
+                base64.append(String(repeating: "=", count: 4 - rem))
+            }
+            if let data = Data(base64Encoded: base64, options: [.ignoreUnknownCharacters]),
+               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                if let vidStr = json["video_id"] as? String, !vidStr.isEmpty {
+                    return String(vidStr.suffix(5))
+                } else if let vidNum = json["video_id"] as? NSNumber {
+                    return String(vidNum.stringValue.suffix(5))
+                }
+            }
+        }
+
+        let basePath = urlString.components(separatedBy: "?").first ?? urlString
+        var hash: UInt64 = 5381
+        for byte in basePath.utf8 {
+            hash = ((hash << 5) &+ hash) &+ UInt64(byte)
+        }
+        return String(format: "%05d", hash % 100_000)
+    }
+
     private func buildSafeFileName(mediaInfo: ExtractedMediaInfo, option: MediaOption) -> String {
         let rawTitle = mediaInfo.title
             .replacingOccurrences(of: #"[^A-Za-z0-9_]+"#, with: "_", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "_"))
-        let clippedTitle = String(rawTitle.prefix(32)).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        let clippedTitle = String(rawTitle.prefix(28)).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
         let safeTitle = clippedTitle.isEmpty ? "media" : clippedTitle
 
         let rawQuality = option.qualityLabel
@@ -269,12 +394,13 @@ final class OmniDownloadManager: ObservableObject {
             }
         }
 
+        let streamToken = extractStreamUniqueToken(from: option.url)
         let timestamp = Int(Date().timeIntervalSince1970) % 100_000
         let platformPrefix = mediaInfo.platform.shortName
             .replacingOccurrences(of: #"[^A-Za-z0-9]+"#, with: "", options: .regularExpression)
             .lowercased()
 
-        return "\(platformPrefix)_\(safeTitle)_\(safeQuality)_\(timestamp).\(finalExt)"
+        return "\(platformPrefix)_\(safeTitle)_\(safeQuality)_\(streamToken)_\(timestamp).\(finalExt)"
     }
 
     private func buildConfiguredRequest(

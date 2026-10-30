@@ -529,6 +529,30 @@ struct ContentView: View {
 
                 Divider().background(Color.white.opacity(0.15))
 
+                let batchOptions = info.batchDownloadOptions
+                if batchOptions.count > 1 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.stack.3d.down.right.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 14, weight: .bold))
+                        Text("Phát hiện trọn bộ \(batchOptions.count) Story / Video của \(info.author)")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundColor(.white.opacity(0.95))
+                            .lineLimit(2)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.green.opacity(0.16))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.green.opacity(0.55), lineWidth: 1)
+                    )
+                }
+
                 // Quality Selector List
                 Text("Chọn chất lượng tải về:")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -631,6 +655,24 @@ struct ContentView: View {
                                 )
                             }
                         }
+                    }
+                }
+
+                if batchOptions.count > 1 {
+                    LiquidGlassPrimaryButton(
+                        title: downloadManager.isDownloading
+                            ? "Đang tải trọn bộ \(batchOptions.count) mục..."
+                            : "Tải tất cả \(batchOptions.count) Story / Video về Ảnh (Full HD)",
+                        systemImage: "square.stack.3d.down.right.fill",
+                        isDisabled: downloadManager.isDownloading,
+                        isLoading: downloadManager.isDownloading,
+                        gradientColors: [
+                            Color(red: 0.10, green: 0.78, blue: 0.56),
+                            Color(red: 0.14, green: 0.65, blue: 0.92),
+                            Color(red: 0.38, green: 0.46, blue: 0.96)
+                        ]
+                    ) {
+                        triggerBatchDownload(info: info, options: batchOptions)
                     }
                 }
             }
@@ -799,6 +841,24 @@ struct ContentView: View {
                     self.statusBanner = item.savedToPhotos
                         ? "Đã tải xong \(item.qualityLabel) & lưu vào Thư viện Ảnh!"
                         : "Đã tải xong \(item.fileName)! Nhấn 'Chia sẻ / Lưu Tệp' để lưu."
+                }
+            } catch {
+                await MainActor.run {
+                    self.extractionError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func triggerBatchDownload(info: ExtractedMediaInfo, options: [MediaOption]) {
+        extractionError = nil
+        statusBanner = nil
+
+        Task {
+            do {
+                let items = try await downloadManager.startDownloadBatch(mediaInfo: info, options: options)
+                await MainActor.run {
+                    self.statusBanner = "Đã tải trọn bộ \(items.count)/\(options.count) Story / Video & lưu vào Thư viện Ảnh!"
                 }
             } catch {
                 await MainActor.run {

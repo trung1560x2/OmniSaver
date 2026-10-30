@@ -50,7 +50,7 @@ struct OtaReleaseInfo: Codable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.versionCode = (try? container.decode(Int.self, forKey: .versionCode)) ?? 0
-        self.versionName = (try? container.decode(String.self, forKey: .versionName)) ?? "2.4.0-FullHD"
+        self.versionName = (try? container.decode(String.self, forKey: .versionName)) ?? "2.5.0-FullHD"
         self.apkUrl = (try? container.decode(String.self, forKey: .apkUrl)) ?? ""
         self.ipaUrl = try? container.decodeIfPresent(String.self, forKey: .ipaUrl)
         self.changelog = (try? container.decode(String.self, forKey: .changelog))
@@ -78,15 +78,15 @@ struct OtaCheckResult: Equatable {
 final class OtaUpdateManager: ObservableObject {
     static let shared = OtaUpdateManager()
 
-    static let currentVersionCode: Int = 7
-    static let currentVersionName: String = "2.4.0-FullHD"
+    static let currentVersionCode: Int = 8
+    static let currentVersionName: String = "2.5.0-FullHD"
 
     static let defaultManifestUrl =
         "https://raw.githubusercontent.com/trung1560x2/OmniSaver/main/ota-version.json"
     static let fallbackGitHubReleasesApi =
         "https://api.github.com/repos/trung1560x2/OmniSaver/releases/latest"
     static let fallbackIpaDownloadUrl =
-        "https://github.com/trung1560x2/OmniSaver/releases/latest/download/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa"
+        "https://github.com/trung1560x2/OmniSaver/releases/latest/download/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa"
 
     private let defaults = UserDefaults.standard
     private let manifestUrlKey = "omnisaver_ios_ota_manifest_url"

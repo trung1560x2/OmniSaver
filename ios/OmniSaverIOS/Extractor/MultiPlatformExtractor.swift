@@ -122,10 +122,11 @@ final class MultiPlatformExtractor {
         let customHeaders = buildMediaHeaders(for: platform, cookie: cookie)
 
         let unescaped = unescapeHtmlAndJson(rawHtml)
+        let isFbStoryUrl = platform == .facebook && cleanUrl.lowercased().contains("/stories/")
         var candidates: [ScoredStreamCandidate] = []
         var seenUrls = Set<String>()
         var discoveredFbVideoId: String? = extractFacebookVideoIdFromText(cleanUrl)
-            ?? extractFacebookVideoIdFromText(unescaped)
+            ?? (isFbStoryUrl ? nil : extractFacebookVideoIdFromText(unescaped))
 
         func addCandidate(
             rawCandidateUrl: String?,
@@ -133,7 +134,8 @@ final class MultiPlatformExtractor {
             defaultScore: Int,
             mediaType: MediaType = .video,
             fileExtension: String? = nil,
-            pairedAudioUrl: String? = nil
+            pairedAudioUrl: String? = nil,
+            allowDiscoverVideoId: Bool = true
         ) {
             guard let rawCandidateUrl = rawCandidateUrl else { return }
             let cleaned = sanitizeCandidateUrl(rawCandidateUrl)
@@ -158,7 +160,8 @@ final class MultiPlatformExtractor {
                             score: newScore,
                             mediaType: existing.mediaType,
                             fileExtension: existing.fileExtension,
-                            audioUrl: newAudio
+                            audioUrl: newAudio,
+                            videoId: existing.videoId
                         )
                     }
                 }
@@ -167,7 +170,7 @@ final class MultiPlatformExtractor {
 
             if mediaType == .video {
                 let efgMeta = inspectFacebookStreamUrl(cleaned)
-                if discoveredFbVideoId == nil, let vid = efgMeta.videoId, !vid.isEmpty {
+                if allowDiscoverVideoId, discoveredFbVideoId == nil, let vid = efgMeta.videoId, !vid.isEmpty {
                     discoveredFbVideoId = vid
                 }
                 if efgMeta.isAudioOnly {
@@ -178,7 +181,8 @@ final class MultiPlatformExtractor {
                             score: 100,
                             mediaType: .audio,
                             fileExtension: "m4a",
-                            audioUrl: nil
+                            audioUrl: nil,
+                            videoId: efgMeta.videoId
                         )
                     )
                     return
@@ -205,7 +209,8 @@ final class MultiPlatformExtractor {
                         score: resolvedScore,
                         mediaType: .video,
                         fileExtension: ext,
-                        audioUrl: pairedAudioUrl
+                        audioUrl: pairedAudioUrl,
+                        videoId: efgMeta.videoId
                     )
                 )
             } else {
@@ -232,7 +237,8 @@ final class MultiPlatformExtractor {
                     defaultLabel: "Âm thanh Stream #\(idx + 1) (M4A)",
                     defaultScore: 100,
                     mediaType: .audio,
-                    fileExtension: "m4a"
+                    fileExtension: "m4a",
+                    allowDiscoverVideoId: idx == 0 || !isFbStoryUrl
                 )
             } else {
                 addCandidate(
@@ -240,7 +246,8 @@ final class MultiPlatformExtractor {
                     defaultLabel: "Video Bắt Trực Tiếp #\(idx + 1) (MP4)",
                     defaultScore: 450,
                     mediaType: .video,
-                    fileExtension: "mp4"
+                    fileExtension: "mp4",
+                    allowDiscoverVideoId: idx == 0 || !isFbStoryUrl
                 )
             }
         }
@@ -255,7 +262,8 @@ final class MultiPlatformExtractor {
                 defaultScore: sc,
                 mediaType: mt,
                 fileExtension: ext,
-                pairedAudioUrl: audUrl
+                pairedAudioUrl: audUrl,
+                allowDiscoverVideoId: !isFbStoryUrl
             )
         }
 
@@ -345,6 +353,10 @@ final class MultiPlatformExtractor {
             desktopUpgradeInfo = await extractThreadsDirect(originalInput: effectivePageUrl, cleanUrl: cleanUrl)
         case .unknown:
             desktopUpgradeInfo = nil
+        }
+
+        if isFbStoryUrl, let upgrade = desktopUpgradeInfo, !upgrade.options.isEmpty {
+            return upgrade
         }
 
         if let upgradeOptions = desktopUpgradeInfo?.options {
@@ -1328,6 +1340,25 @@ final class MultiPlatformExtractor {
         let mediaType: MediaType
         let fileExtension: String
         let audioUrl: String?
+        let videoId: String?
+
+        init(
+            url: String,
+            label: String,
+            score: Int,
+            mediaType: MediaType,
+            fileExtension: String,
+            audioUrl: String?,
+            videoId: String? = nil
+        ) {
+            self.url = url
+            self.label = label
+            self.score = score
+            self.mediaType = mediaType
+            self.fileExtension = fileExtension
+            self.audioUrl = audioUrl
+            self.videoId = videoId
+        }
     }
 
     private func inspectFacebookStreamUrl(_ rawUrl: String) -> FacebookEfgMeta {
@@ -1497,17 +1528,70 @@ final class MultiPlatformExtractor {
         return tokens
     }
 
-    private func unwrapFacebookLoginRedirect(_ url: String) -> String {
-        let lower = url.lowercased()
-        if lower.contains("/login") && lower.contains("next=") {
-            if let nextParam = firstRegexMatch(pattern: #"[?&]next=([^&#]+)"#, in: url)?.group(1),
-               !nextParam.isEmpty,
-               let decoded = nextParam.removingPercentEncoding,
-               decoded.lowercased().hasPrefix("http") {
-                return decoded
+    private func normalizeFacebookStoryCardKey(_ rawToken: String) -> String {
+        let trimmed = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlDecoded = (trimmed.removingPercentEncoding ?? trimmed)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if (8...22).contains(urlDecoded.count) && urlDecoded.allSatisfy({ $0.isNumber }) {
+            return "ISC_\(urlDecoded)"
+        }
+        if let data = decodeBase64Flexible(urlDecoded),
+           let decodedStr = String(data: data, encoding: .utf8),
+           let numId = firstRegexMatch(pattern: #"(\d{8,22})"#, in: decodedStr)?.group(1),
+           !numId.isEmpty {
+            return "ISC_\(numId)"
+        }
+        return urlDecoded.trimmingCharacters(in: CharacterSet(charactersIn: "="))
+    }
+
+    private func extractFacebookPhotoStoryUrlFromSlice(_ slice: String) -> String? {
+        let patterns = [
+            #""viewer_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""#,
+            #""photo_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""#,
+            #""__typename"\s*:\s*"Photo"[\s\S]{0,1200}?"image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""#
+        ]
+        for pattern in patterns {
+            for m in regexMatches(pattern: pattern, in: slice) {
+                guard let raw = m.group(1) else { continue }
+                let cleaned = sanitizeCandidateUrl(raw)
+                let lower = cleaned.lowercased()
+                if lower.hasPrefix("http") &&
+                   !lower.contains("p50x50") &&
+                   !lower.contains("s50x50") &&
+                   !lower.contains("p100x100") &&
+                   !lower.contains("s100x100") {
+                    return cleaned
+                }
             }
         }
-        return url
+        return nil
+    }
+
+    private func unwrapFacebookLoginRedirect(_ url: String) -> String {
+        var current = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        for _ in 0..<3 {
+            let lower = current.lowercased()
+            if lower.contains("/login") && lower.contains("next=") {
+                if let nextParam = firstRegexMatch(pattern: #"[?&]next=([^&#"'\s]+)"#, in: current)?.group(1),
+                   !nextParam.isEmpty,
+                   let decoded = nextParam.removingPercentEncoding,
+                   decoded.lowercased().hasPrefix("http") {
+                    current = decoded
+                    continue
+                }
+            }
+            if lower.contains("l.facebook.com/l.php") && lower.contains("u=") {
+                if let uParam = firstRegexMatch(pattern: #"[?&]u=([^&#"'\s]+)"#, in: current)?.group(1),
+                   !uParam.isEmpty,
+                   let decoded = uParam.removingPercentEncoding,
+                   decoded.lowercased().hasPrefix("http") {
+                    current = decoded
+                    continue
+                }
+            }
+            break
+        }
+        return current
     }
 
     private func toDesktopFacebookUrl(_ url: String) -> String {
@@ -1628,8 +1712,9 @@ final class MultiPlatformExtractor {
         let repPattern = #"<Representation\b([^>]*)>[\s\S]*?<BaseURL>\s*(https?:[^<\s"']+)\s*</BaseURL>"#
 
         var bestDashAudioUrl: String?
+        var audioByVideoId: [String: String] = [:]
 
-        // Pre-scan Relay JSON `"base_url"` audio representations so `bestDashAudioUrl` is always known
+        // Pre-scan Relay JSON `"base_url"` audio representations so `bestDashAudioUrl` and `audioByVideoId` are always known
         let jsonBaseMatches = regexMatches(pattern: #""base_url"\s*:\s*"(https?:[^"]+)""#, in: region)
         for jm in jsonBaseMatches {
             guard let rawBase = jm.group(1) else { continue }
@@ -1642,6 +1727,9 @@ final class MultiPlatformExtractor {
             if isAudio {
                 if bestDashAudioUrl == nil {
                     bestDashAudioUrl = cleanedUrl
+                }
+                if let vid = efg.videoId, !vid.isEmpty, audioByVideoId[vid] == nil {
+                    audioByVideoId[vid] = cleanedUrl
                 }
                 register(cleanedUrl, "Âm thanh gốc (M4A)", 110, isTargetSlice, nil)
             }
@@ -1676,11 +1764,14 @@ final class MultiPlatformExtractor {
                     if bestDashAudioUrl == nil {
                         bestDashAudioUrl = cleanedUrl
                     }
+                    if let vid = efg.videoId, !vid.isEmpty, audioByVideoId[vid] == nil {
+                        audioByVideoId[vid] = cleanedUrl
+                    }
                     register(cleanedUrl, "Âm thanh gốc (M4A)", 110, isTargetSlice, nil)
                 }
             }
 
-            // Second pass per MPD: register DASH Video `<Representation>` tracks paired with `mpdAudioUrl`
+            // Second pass per MPD: register DASH Video `<Representation>` tracks paired with `audioByVideoId` / `mpdAudioUrl`
             for rm in repMatches {
                 let attrs = rm.group(1) ?? ""
                 let rawBaseUrl = rm.group(2) ?? ""
@@ -1729,7 +1820,8 @@ final class MultiPlatformExtractor {
                     dashScore = 360
                 }
 
-                register(cleanedUrl, dashLabel, dashScore, isTargetSlice, mpdAudioUrl ?? bestDashAudioUrl)
+                let pairedAudio = (efg.videoId.flatMap { audioByVideoId[$0] }) ?? mpdAudioUrl ?? bestDashAudioUrl
+                register(cleanedUrl, dashLabel, dashScore, isTargetSlice, pairedAudio)
             }
         }
 
@@ -1754,7 +1846,8 @@ final class MultiPlatformExtractor {
             if res >= 720 {
                 let label = res >= 1080 ? "Full HD 1080p (MP4)" : "HD 720p (MP4)"
                 let score = (res >= 1080 ? 1150 : 950) + codecBonus
-                register(cleanedUrl, label, score, isTargetSlice, bestDashAudioUrl)
+                let pairedAudio = (efg.videoId.flatMap { audioByVideoId[$0] }) ?? bestDashAudioUrl
+                register(cleanedUrl, label, score, isTargetSlice, pairedAudio)
             }
         }
     }
@@ -1764,6 +1857,13 @@ final class MultiPlatformExtractor {
         cleanUrl: String,
         hintVideoId: String? = nil
     ) async -> ExtractedMediaInfo? {
+        struct StoryBucketGroup {
+            let key: String
+            let rawToken: String
+            var videoId: String?
+            var candidates: [ScoredStreamCandidate]
+        }
+
         let cookie = AuthCookieStore.shared.getEffectiveCookie(for: .facebook, targetUrl: cleanUrl)
         let desktopCookie = buildDesktopFacebookCookie(cookie)
         let fbHeaders = buildMediaHeaders(for: .facebook, cookie: cookie)
@@ -1779,75 +1879,50 @@ final class MultiPlatformExtractor {
         var finalResolvedUrl = toDesktopFacebookUrl(initialResolved)
         var targetVideoId: String? = hintVideoId ?? extractFacebookVideoIdFromText(finalResolvedUrl)
 
+        var urlStoryTokens = extractFacebookStoryTokens(cleanUrl)
+            + extractFacebookStoryTokens(initialResolved)
+            + extractFacebookStoryTokens(finalResolvedUrl)
+        var targetStoryKeys: Set<String> = Set(urlStoryTokens.map { normalizeFacebookStoryCardKey($0) })
+
         let videoRedirectPattern = #"/video_redirect/\?src=([^"&'\s<>]+)"#
+
+        var storyGroups: [StoryBucketGroup] = []
+        var storyGroupIndexByKey: [String: Int] = [:]
 
         var candidates: [ScoredStreamCandidate] = []
         var seenUrls = Set<String>()
+        var globalAudioByVideoId: [String: String] = [:]
         var ogVideoUrl = ""
         var ogImageUrl = ""
         var ogTitle = ""
         var ogDescription = ""
         var detectedAuthor = ""
 
-        func registerCandidateUrl(
+        func buildCandidateFromRaw(
             rawCandidate: String?,
             defaultLabel: String,
             defaultScore: Int,
             isTargetSlice: Bool = false,
             pairedAudioUrl: String? = nil
-        ) {
-            guard let rawCandidate = rawCandidate else { return }
+        ) -> ScoredStreamCandidate? {
+            guard let rawCandidate = rawCandidate else { return nil }
             let cleaned = sanitizeCandidateUrl(rawCandidate)
-            guard cleaned.lowercased().hasPrefix("http") else { return }
+            guard cleaned.lowercased().hasPrefix("http") else { return nil }
 
             let efgMeta = inspectFacebookStreamUrl(cleaned)
-            if !isTargetSlice,
-               let targetVid = targetVideoId,
-               let efgVid = efgMeta.videoId,
-               !efgVid.isEmpty,
-               efgVid != targetVid,
-               candidates.contains(where: { $0.mediaType == .video }) {
-                return
-            }
-
-            if !seenUrls.insert(cleaned).inserted {
-                if let existingIdx = candidates.firstIndex(where: { $0.url == cleaned }) {
-                    let existing = candidates[existingIdx]
-                    let bonus = (isTargetSlice || (targetVideoId != nil && efgMeta.videoId == targetVideoId)) ? 250 : 0
-                    let candidateScore = max(defaultScore, efgMeta.resolutionScore) + bonus
-                    let newAudio = existing.audioUrl ?? pairedAudioUrl
-                    let newScore = max(existing.score, candidateScore)
-                    let newLabel = candidateScore > existing.score ? defaultLabel : existing.label
-                    if newAudio != existing.audioUrl || newScore != existing.score {
-                        candidates[existingIdx] = ScoredStreamCandidate(
-                            url: existing.url,
-                            label: newLabel,
-                            score: newScore,
-                            mediaType: existing.mediaType,
-                            fileExtension: existing.fileExtension,
-                            audioUrl: newAudio
-                        )
-                    }
-                }
-                return
-            }
-
-            if targetVideoId == nil, let efgVid = efgMeta.videoId, !efgVid.isEmpty {
-                targetVideoId = efgVid
-            }
-
             if efgMeta.isAudioOnly {
-                candidates.append(
-                    ScoredStreamCandidate(
-                        url: cleaned,
-                        label: "Âm thanh gốc (M4A)",
-                        score: 100,
-                        mediaType: .audio,
-                        fileExtension: "m4a",
-                        audioUrl: nil
-                    )
+                if let vid = efgMeta.videoId, !vid.isEmpty, globalAudioByVideoId[vid] == nil {
+                    globalAudioByVideoId[vid] = cleaned
+                }
+                return ScoredStreamCandidate(
+                    url: cleaned,
+                    label: "Âm thanh gốc (M4A)",
+                    score: 100,
+                    mediaType: .audio,
+                    fileExtension: "m4a",
+                    audioUrl: nil,
+                    videoId: efgMeta.videoId
                 )
-                return
             }
 
             let bonus = (isTargetSlice || (targetVideoId != nil && efgMeta.videoId == targetVideoId)) ? 250 : 0
@@ -1868,76 +1943,226 @@ final class MultiPlatformExtractor {
                 effectiveLabel = efgMeta.qualityLabel ?? defaultLabel
             }
 
-            candidates.append(
-                ScoredStreamCandidate(
-                    url: cleaned,
-                    label: effectiveLabel,
-                    score: effectiveScore,
-                    mediaType: .video,
-                    fileExtension: "mp4",
-                    audioUrl: pairedAudioUrl
-                )
+            let resolvedPairedAudio = pairedAudioUrl ?? (efgMeta.videoId.flatMap { globalAudioByVideoId[$0] })
+            return ScoredStreamCandidate(
+                url: cleaned,
+                label: effectiveLabel,
+                score: effectiveScore,
+                mediaType: .video,
+                fileExtension: "mp4",
+                audioUrl: resolvedPairedAudio,
+                videoId: efgMeta.videoId
             )
+        }
+
+        func mergeCandidateIntoList(_ cand: ScoredStreamCandidate, list: inout [ScoredStreamCandidate]) {
+            if let existingIdx = list.firstIndex(where: { $0.url == cand.url }) {
+                let existing = list[existingIdx]
+                let newAudio = existing.audioUrl ?? cand.audioUrl ?? (existing.videoId.flatMap { globalAudioByVideoId[$0] })
+                let newVideoId = existing.videoId ?? cand.videoId
+                let newScore = max(existing.score, cand.score)
+                let newLabel = cand.score > existing.score ? cand.label : existing.label
+                list[existingIdx] = ScoredStreamCandidate(
+                    url: existing.url,
+                    label: newLabel,
+                    score: newScore,
+                    mediaType: existing.mediaType,
+                    fileExtension: existing.fileExtension,
+                    audioUrl: newAudio,
+                    videoId: newVideoId
+                )
+            } else {
+                list.append(cand)
+            }
+        }
+
+        func registerCandidateUrl(
+            rawCandidate: String?,
+            defaultLabel: String,
+            defaultScore: Int,
+            isTargetSlice: Bool = false,
+            pairedAudioUrl: String? = nil
+        ) {
+            guard let built = buildCandidateFromRaw(
+                rawCandidate: rawCandidate,
+                defaultLabel: defaultLabel,
+                defaultScore: defaultScore,
+                isTargetSlice: isTargetSlice,
+                pairedAudioUrl: pairedAudioUrl
+            ) else { return }
+
+            if targetVideoId == nil,
+               storyGroups.isEmpty,
+               let efgVid = built.videoId,
+               !efgVid.isEmpty {
+                targetVideoId = efgVid
+            }
+
+            seenUrls.insert(built.url)
+            mergeCandidateIntoList(built, list: &candidates)
+
+            if let vid = built.videoId, !vid.isEmpty,
+               let gIdx = storyGroups.firstIndex(where: { $0.videoId == vid }) {
+                mergeCandidateIntoList(built, list: &storyGroups[gIdx].candidates)
+            }
         }
 
         func parseFacebookHtml(_ html: String) {
             let unescaped = unescapeHtmlAndJson(html)
             let nsUnescaped = unescaped as NSString
             let totalLen = nsUnescaped.length
-            let storyTokens = extractFacebookStoryTokens(finalResolvedUrl)
 
-            var targetSlices: [String] = []
-            for token in storyTokens {
-                var searchRange = NSRange(location: 0, length: totalLen)
-                var count = 0
-                while count < 3 && searchRange.location < totalLen {
-                    let found = nsUnescaped.range(of: token, options: [], range: searchRange)
-                    if found.location == NSNotFound { break }
-                    let start = max(0, found.location - 25_000)
-                    let end = min(totalLen, found.location + 65_000)
-                    let slice = nsUnescaped.substring(with: NSRange(location: start, length: end - start))
-                    targetSlices.append(slice)
-                    if targetVideoId == nil {
-                        targetVideoId = extractFacebookVideoIdFromText(slice)
+            urlStoryTokens = extractFacebookStoryTokens(cleanUrl)
+                + extractFacebookStoryTokens(initialResolved)
+                + extractFacebookStoryTokens(finalResolvedUrl)
+            targetStoryKeys = Set(urlStoryTokens.map { normalizeFacebookStoryCardKey($0) })
+
+            // 1. Multi-Story Bucket Card Boundary Isolation (`UzpfSVNDOj...` tokens)
+            let tokenMatches = regexMatches(
+                pattern: #"UzpfSVNDOj[A-Za-z0-9+/=_-]+"#,
+                in: unescaped
+            )
+
+            for (i, m_i) in tokenMatches.enumerated() {
+                let rawTok = m_i.fullMatch
+                let cardKey = normalizeFacebookStoryCardKey(rawTok)
+                guard !cardKey.isEmpty else { continue }
+
+                var nextDiffLocation: Int? = nil
+                if i + 1 < tokenMatches.count {
+                    for j in (i + 1)..<tokenMatches.count {
+                        let otherKey = normalizeFacebookStoryCardKey(tokenMatches[j].fullMatch)
+                        if otherKey != cardKey {
+                            nextDiffLocation = tokenMatches[j].range.location
+                            break
+                        }
                     }
-                    let nextLoc = found.location + found.length
-                    searchRange = NSRange(location: nextLoc, length: max(0, totalLen - nextLoc))
-                    count += 1
                 }
-            }
 
-            if targetVideoId == nil {
-                targetVideoId = extractFacebookVideoIdFromText(unescaped)
-            }
+                let sliceStart = max(0, m_i.range.location - 200)
+                let maxEnd = min(totalLen, m_i.range.location + m_i.range.length + 45_000)
+                let sliceEnd = nextDiffLocation != nil ? min(maxEnd, nextDiffLocation!) : maxEnd
+                guard sliceEnd > sliceStart else { continue }
 
-            if let vid = targetVideoId, !vid.isEmpty {
-                var searchRange = NSRange(location: 0, length: totalLen)
-                var count = 0
-                while count < 4 && searchRange.location < totalLen {
-                    let found = nsUnescaped.range(of: vid, options: [], range: searchRange)
-                    if found.location == NSNotFound { break }
-                    let start = max(0, found.location - 25_000)
-                    let end = min(totalLen, found.location + 65_000)
-                    targetSlices.append(nsUnescaped.substring(with: NSRange(location: start, length: end - start)))
-                    let nextLoc = found.location + found.length
-                    searchRange = NSRange(location: nextLoc, length: max(0, totalLen - nextLoc))
-                    count += 1
-                }
-            }
+                let cardSlice = nsUnescaped.substring(with: NSRange(location: sliceStart, length: sliceEnd - sliceStart))
+                let isTargetCard = targetStoryKeys.contains(cardKey)
 
-            for slice in targetSlices {
-                extractFacebookStreamsFromSlice(region: slice, isTargetSlice: true) { u, lbl, sc, isT, audUrl in
-                    registerCandidateUrl(
+                var cardCandidates: [ScoredStreamCandidate] = []
+                extractFacebookStreamsFromSlice(region: cardSlice, isTargetSlice: true) { u, lbl, sc, _, audUrl in
+                    if let cand = buildCandidateFromRaw(
                         rawCandidate: u,
                         defaultLabel: lbl,
                         defaultScore: sc,
-                        isTargetSlice: isT,
+                        isTargetSlice: isTargetCard,
                         pairedAudioUrl: audUrl
-                    )
+                    ) {
+                        mergeCandidateIntoList(cand, list: &cardCandidates)
+                        seenUrls.insert(cand.url)
+                        mergeCandidateIntoList(cand, list: &candidates)
+                    }
+                }
+
+                if !cardCandidates.contains(where: { $0.mediaType == .video }) {
+                    if let photoUrl = extractFacebookPhotoStoryUrlFromSlice(cardSlice) {
+                        let imgCand = ScoredStreamCandidate(
+                            url: photoUrl,
+                            label: "Ảnh Story HD (JPG)",
+                            score: 900,
+                            mediaType: .image,
+                            fileExtension: "jpg",
+                            audioUrl: nil,
+                            videoId: nil
+                        )
+                        mergeCandidateIntoList(imgCand, list: &cardCandidates)
+                        seenUrls.insert(imgCand.url)
+                        mergeCandidateIntoList(imgCand, list: &candidates)
+                    }
+                }
+
+                let hasPrimaryMedia = cardCandidates.contains(where: { $0.mediaType == .video || $0.mediaType == .image })
+                if hasPrimaryMedia {
+                    let discoveredCardVid = cardCandidates.compactMap({ $0.videoId }).first(where: { !$0.isEmpty })
+                        ?? extractFacebookVideoIdFromText(cardSlice)
+
+                    if let existingGroupIdx = storyGroupIndexByKey[cardKey] {
+                        if storyGroups[existingGroupIdx].videoId == nil, let vid = discoveredCardVid {
+                            storyGroups[existingGroupIdx].videoId = vid
+                        }
+                        for cand in cardCandidates {
+                            mergeCandidateIntoList(cand, list: &storyGroups[existingGroupIdx].candidates)
+                        }
+                    } else {
+                        let newGroup = StoryBucketGroup(
+                            key: cardKey,
+                            rawToken: rawTok,
+                            videoId: discoveredCardVid,
+                            candidates: cardCandidates
+                        )
+                        storyGroupIndexByKey[cardKey] = storyGroups.count
+                        storyGroups.append(newGroup)
+                    }
                 }
             }
 
-            if !candidates.contains(where: { $0.mediaType == .video && $0.score >= 720 }) {
+            if let matchedGroup = storyGroups.first(where: {
+                targetStoryKeys.contains($0.key) || (hintVideoId != nil && $0.videoId == hintVideoId)
+            }) {
+                targetVideoId = matchedGroup.videoId ?? targetVideoId
+            }
+
+            // 2. Standard (non-UzpfSVNDOj) pages or fallback when storyGroups is empty
+            if storyGroups.isEmpty {
+                var targetSlices: [String] = []
+                for token in urlStoryTokens {
+                    var searchRange = NSRange(location: 0, length: totalLen)
+                    var count = 0
+                    while count < 3 && searchRange.location < totalLen {
+                        let found = nsUnescaped.range(of: token, options: [], range: searchRange)
+                        if found.location == NSNotFound { break }
+                        let start = max(0, found.location - 200)
+                        let end = min(totalLen, found.location + 18_000)
+                        let slice = nsUnescaped.substring(with: NSRange(location: start, length: max(0, end - start)))
+                        targetSlices.append(slice)
+                        if targetVideoId == nil {
+                            targetVideoId = extractFacebookVideoIdFromText(slice)
+                        }
+                        let nextLoc = found.location + found.length
+                        searchRange = NSRange(location: nextLoc, length: max(0, totalLen - nextLoc))
+                        count += 1
+                    }
+                }
+
+                if targetVideoId == nil {
+                    targetVideoId = extractFacebookVideoIdFromText(unescaped)
+                }
+
+                if let vid = targetVideoId, !vid.isEmpty {
+                    var searchRange = NSRange(location: 0, length: totalLen)
+                    var count = 0
+                    while count < 4 && searchRange.location < totalLen {
+                        let found = nsUnescaped.range(of: vid, options: [], range: searchRange)
+                        if found.location == NSNotFound { break }
+                        let start = max(0, found.location - 4_000)
+                        let end = min(totalLen, found.location + 45_000)
+                        targetSlices.append(nsUnescaped.substring(with: NSRange(location: start, length: max(0, end - start))))
+                        let nextLoc = found.location + found.length
+                        searchRange = NSRange(location: nextLoc, length: max(0, totalLen - nextLoc))
+                        count += 1
+                    }
+                }
+
+                for slice in targetSlices {
+                    extractFacebookStreamsFromSlice(region: slice, isTargetSlice: true) { u, lbl, sc, isT, audUrl in
+                        registerCandidateUrl(
+                            rawCandidate: u,
+                            defaultLabel: lbl,
+                            defaultScore: sc,
+                            isTargetSlice: isT,
+                            pairedAudioUrl: audUrl
+                        )
+                    }
+                }
+
                 extractFacebookStreamsFromSlice(region: unescaped, isTargetSlice: false) { u, lbl, sc, isT, audUrl in
                     registerCandidateUrl(
                         rawCandidate: u,
@@ -2020,7 +2245,7 @@ final class MultiPlatformExtractor {
         if finalResolvedUrl.contains("://www.facebook.com") {
             initialDesktopTargets.append(finalResolvedUrl.replacingOccurrences(of: "://www.facebook.com", with: "://web.facebook.com"))
         }
-        if let vid = targetVideoId, !vid.isEmpty {
+        if let vid = targetVideoId, !vid.isEmpty, !finalResolvedUrl.lowercased().contains("/stories/") {
             initialDesktopTargets.append("https://www.facebook.com/watch/?v=\(vid)")
             initialDesktopTargets.append("https://www.facebook.com/reel/\(vid)")
         }
@@ -2035,14 +2260,17 @@ final class MultiPlatformExtractor {
                     parseFacebookHtml(html)
                 }
             }
+            if !storyGroups.isEmpty {
+                break
+            }
             if candidates.contains(where: { $0.mediaType == .video && $0.score >= 720 }) {
                 break
             }
         }
 
-        // 2. Two-stage upgrade: if initial desktop request doesn't find HD, probe `mbasic.facebook.com` / `m.facebook.com`
-        // to discover `targetVideoId`, then query `https://www.facebook.com/watch/?v=<id>` and `/reel/<id>` for 1080p Full HD
-        let hasHdVideo = candidates.contains(where: { $0.mediaType == .video && $0.score >= 720 })
+        // 2. Two-stage upgrade: if initial desktop request doesn't find HD (and no story bucket was parsed),
+        // probe `mbasic.facebook.com` / `m.facebook.com` to discover `targetVideoId`, then query `/watch/?v=<id>` and `/reel/<id>` for 1080p Full HD
+        let hasHdVideo = !storyGroups.isEmpty || candidates.contains(where: { $0.mediaType == .video && $0.score >= 720 })
         let videoIdBeforeMobile = targetVideoId
         if !hasHdVideo {
             let baseTarget = finalResolvedUrl.isEmpty ? cleanUrl : finalResolvedUrl
@@ -2093,7 +2321,7 @@ final class MultiPlatformExtractor {
                 hdUpgradeUrls.append("https://web.facebook.com/watch/?v=\(newVid)")
             }
 
-            if !candidates.contains(where: { $0.score >= 720 }) {
+            if storyGroups.isEmpty && !candidates.contains(where: { $0.score >= 720 }) {
                 var seenUpgrade = Set<String>()
                 for upgradeUrl in hdUpgradeUrls where seenUpgrade.insert(upgradeUrl).inserted {
                     if let (upgradeHtml, resolved) = await fetchFacebookDesktopPage(urlToFetch: upgradeUrl, desktopCookie: desktopCookie) {
@@ -2104,100 +2332,344 @@ final class MultiPlatformExtractor {
                             parseFacebookHtml(upgradeHtml)
                         }
                     }
-                    if candidates.contains(where: { $0.mediaType == .video && $0.score >= 720 }) {
+                    if !storyGroups.isEmpty || candidates.contains(where: { $0.mediaType == .video && $0.score >= 720 }) {
                         break
                     }
                 }
             }
         }
 
-        if !candidates.contains(where: { $0.mediaType == .video }) && ogVideoUrl.lowercased().hasPrefix("http") {
+        if storyGroups.isEmpty && !candidates.contains(where: { $0.mediaType == .video }) && ogVideoUrl.lowercased().hasPrefix("http") {
             registerCandidateUrl(rawCandidate: ogVideoUrl, defaultLabel: "HD Video (MP4)", defaultScore: 720)
         }
 
         let fallbackDashAudioUrl = candidates.first(where: { $0.mediaType == .audio })?.url
-
-        let sortedVideoAndAudio = candidates.sorted { lhs, rhs in
-            let lhsIsVideo = lhs.mediaType == .video ? 1 : 0
-            let rhsIsVideo = rhs.mediaType == .video ? 1 : 0
-            if lhsIsVideo != rhsIsVideo {
-                return lhsIsVideo > rhsIsVideo
-            }
-            return lhs.score > rhs.score
-        }
+        let resolvedAuthor = detectedAuthor.isEmpty ? "Facebook" : detectedAuthor
 
         var options: [MediaOption] = []
-        var markedHighestVideo = false
-        for cand in sortedVideoAndAudio {
-            let isHighest: Bool
-            if cand.mediaType == .video && !markedHighestVideo {
-                markedHighestVideo = true
-                isHighest = true
-            } else {
-                isHighest = false
-            }
-            let resolvedAudioUrl: String?
-            if let directAudio = cand.audioUrl {
-                resolvedAudioUrl = directAudio
-            } else if cand.mediaType == .video && isFacebookDashVideoOnlyUrl(cand.url) {
-                resolvedAudioUrl = fallbackDashAudioUrl
-            } else {
-                resolvedAudioUrl = nil
-            }
-            options.append(
-                MediaOption(
-                    url: cand.url,
-                    qualityLabel: cand.label,
-                    fileExtension: cand.fileExtension,
-                    mediaType: cand.mediaType,
-                    isHighestQuality: isHighest,
-                    isNoWatermark: true,
-                    customHeaders: fbHeaders,
-                    audioUrl: resolvedAudioUrl
-                )
-            )
-        }
+        var optionSeenUrls = Set<String>()
+        let safeTitle: String
 
-        if ogImageUrl.lowercased().hasPrefix("http") && seenUrls.insert(ogImageUrl).inserted {
-            options.append(
-                MediaOption(
-                    url: ogImageUrl,
-                    qualityLabel: "Ảnh bìa (Cover)",
-                    fileExtension: "jpg",
-                    mediaType: .image,
-                    isHighestQuality: options.isEmpty,
-                    isNoWatermark: true,
-                    customHeaders: fbHeaders
+        if !storyGroups.isEmpty {
+            let targetIdx: Int = storyGroups.firstIndex(where: {
+                targetStoryKeys.contains($0.key) || (targetVideoId != nil && $0.videoId == targetVideoId)
+            }) ?? 0
+
+            let hasExplicitTarget = !targetStoryKeys.isEmpty || hintVideoId != nil
+            let totalStories = storyGroups.count
+            let targetGroup = storyGroups[targetIdx]
+
+            let targetGroupAudioUrl = targetGroup.candidates.first(where: { $0.mediaType == .audio })?.url
+                ?? (targetGroup.videoId.flatMap { globalAudioByVideoId[$0] })
+                ?? fallbackDashAudioUrl
+
+            let targetPrimaryCands = targetGroup.candidates
+                .filter { $0.mediaType == .video || $0.mediaType == .image }
+                .sorted { lhs, rhs in
+                    let lv = lhs.mediaType == .video ? 1 : 0
+                    let rv = rhs.mediaType == .video ? 1 : 0
+                    return lv != rv ? lv > rv : lhs.score > rhs.score
+                }
+
+            var markedHighest = false
+            for cand in targetPrimaryCands {
+                guard optionSeenUrls.insert(cand.url).inserted else { continue }
+                let resolvedAudio: String?
+                if cand.mediaType == .video {
+                    if let directAudio = cand.audioUrl {
+                        resolvedAudio = directAudio
+                    } else if let vid = cand.videoId, let byVid = globalAudioByVideoId[vid] {
+                        resolvedAudio = byVid
+                    } else if isFacebookDashVideoOnlyUrl(cand.url) {
+                        resolvedAudio = targetGroupAudioUrl
+                    } else {
+                        resolvedAudio = nil
+                    }
+                } else {
+                    resolvedAudio = nil
+                }
+
+                let prefix: String
+                if totalStories > 1 {
+                    prefix = "Story #\(targetIdx + 1) (Link này) • "
+                } else {
+                    prefix = "Story #1 • "
+                }
+
+                options.append(
+                    MediaOption(
+                        url: cand.url,
+                        qualityLabel: "\(prefix)\(cand.label)",
+                        fileExtension: cand.fileExtension,
+                        mediaType: cand.mediaType,
+                        isHighestQuality: !markedHighest,
+                        isNoWatermark: true,
+                        customHeaders: fbHeaders,
+                        audioUrl: resolvedAudio
+                    )
                 )
-            )
+                markedHighest = true
+            }
+
+            if totalStories > 1 {
+                for idx in 0..<totalStories where idx != targetIdx {
+                    let otherGroup = storyGroups[idx]
+                    let otherAudioUrl = otherGroup.candidates.first(where: { $0.mediaType == .audio })?.url
+                        ?? (otherGroup.videoId.flatMap { globalAudioByVideoId[$0] })
+                        ?? fallbackDashAudioUrl
+
+                    let otherPrimary = otherGroup.candidates
+                        .filter { $0.mediaType == .video || $0.mediaType == .image }
+                        .sorted { lhs, rhs in
+                            let lv = lhs.mediaType == .video ? 1 : 0
+                            let rv = rhs.mediaType == .video ? 1 : 0
+                            return lv != rv ? lv > rv : lhs.score > rhs.score
+                        }
+
+                    if let bestCand = otherPrimary.first, optionSeenUrls.insert(bestCand.url).inserted {
+                        let resolvedAudio: String?
+                        if bestCand.mediaType == .video {
+                            if let directAudio = bestCand.audioUrl {
+                                resolvedAudio = directAudio
+                            } else if let vid = bestCand.videoId, let byVid = globalAudioByVideoId[vid] {
+                                resolvedAudio = byVid
+                            } else if isFacebookDashVideoOnlyUrl(bestCand.url) {
+                                resolvedAudio = otherAudioUrl
+                            } else {
+                                resolvedAudio = nil
+                            }
+                        } else {
+                            resolvedAudio = nil
+                        }
+
+                        options.append(
+                            MediaOption(
+                                url: bestCand.url,
+                                qualityLabel: "Story #\(idx + 1) • \(bestCand.label)",
+                                fileExtension: bestCand.fileExtension,
+                                mediaType: bestCand.mediaType,
+                                isHighestQuality: false,
+                                isNoWatermark: true,
+                                customHeaders: fbHeaders,
+                                audioUrl: resolvedAudio
+                            )
+                        )
+                    }
+                }
+            }
+
+            if let audUrl = targetGroupAudioUrl, optionSeenUrls.insert(audUrl).inserted {
+                options.append(
+                    MediaOption(
+                        url: audUrl,
+                        qualityLabel: "Âm thanh gốc (M4A)",
+                        fileExtension: "m4a",
+                        mediaType: .audio,
+                        isHighestQuality: false,
+                        isNoWatermark: true,
+                        customHeaders: fbHeaders
+                    )
+                )
+            }
+
+            if ogImageUrl.lowercased().hasPrefix("http") && optionSeenUrls.insert(ogImageUrl).inserted {
+                options.append(
+                    MediaOption(
+                        url: ogImageUrl,
+                        qualityLabel: "Ảnh bìa (Cover)",
+                        fileExtension: "jpg",
+                        mediaType: .image,
+                        isHighestQuality: options.isEmpty,
+                        isNoWatermark: true,
+                        customHeaders: fbHeaders
+                    )
+                )
+            }
+
+            let shortId = String((targetGroup.videoId ?? targetGroup.key).suffix(4))
+            if totalStories > 1 && hasExplicitTarget {
+                safeTitle = "Story #\(targetIdx + 1)/\(totalStories) của \(resolvedAuthor) (#\(shortId))"
+            } else if totalStories > 1 {
+                safeTitle = "Trọn bộ \(totalStories) Story của \(resolvedAuthor) (#\(shortId))"
+            } else {
+                safeTitle = "Story của \(resolvedAuthor) (#\(shortId))"
+            }
+        } else {
+            // Regular Facebook video/reel or multi-video post
+            let videoCands = candidates.filter { $0.mediaType == .video }
+            var orderedVideoIds: [String] = []
+            for vc in videoCands {
+                let vidKey = vc.videoId ?? "__default__"
+                if !orderedVideoIds.contains(vidKey) {
+                    orderedVideoIds.append(vidKey)
+                }
+            }
+            if let tVid = targetVideoId, let pos = orderedVideoIds.firstIndex(of: tVid), pos > 0 {
+                orderedVideoIds.remove(at: pos)
+                orderedVideoIds.insert(tVid, at: 0)
+            }
+
+            let hasMultipleVideos = orderedVideoIds.filter { $0 != "__default__" }.count > 1
+            var markedHighestVideo = false
+
+            if hasMultipleVideos {
+                for (vIdx, vidKey) in orderedVideoIds.enumerated() {
+                    let groupCands = videoCands
+                        .filter { ($0.videoId ?? "__default__") == vidKey }
+                        .sorted { $0.score > $1.score }
+                    if vIdx == 0 {
+                        for cand in groupCands where optionSeenUrls.insert(cand.url).inserted {
+                            let resolvedAudio = cand.audioUrl
+                                ?? (cand.videoId.flatMap { globalAudioByVideoId[$0] })
+                                ?? (isFacebookDashVideoOnlyUrl(cand.url) ? fallbackDashAudioUrl : nil)
+                            options.append(
+                                MediaOption(
+                                    url: cand.url,
+                                    qualityLabel: "Video #1 • \(cand.label)",
+                                    fileExtension: cand.fileExtension,
+                                    mediaType: .video,
+                                    isHighestQuality: !markedHighestVideo,
+                                    isNoWatermark: true,
+                                    customHeaders: fbHeaders,
+                                    audioUrl: resolvedAudio
+                                )
+                            )
+                            markedHighestVideo = true
+                        }
+                    } else if let best = groupCands.first, optionSeenUrls.insert(best.url).inserted {
+                        let resolvedAudio = best.audioUrl
+                            ?? (best.videoId.flatMap { globalAudioByVideoId[$0] })
+                            ?? (isFacebookDashVideoOnlyUrl(best.url) ? fallbackDashAudioUrl : nil)
+                        options.append(
+                            MediaOption(
+                                url: best.url,
+                                qualityLabel: "Video #\(vIdx + 1) • \(best.label)",
+                                fileExtension: best.fileExtension,
+                                mediaType: .video,
+                                isHighestQuality: false,
+                                isNoWatermark: true,
+                                customHeaders: fbHeaders,
+                                audioUrl: resolvedAudio
+                            )
+                        )
+                    }
+                }
+            } else {
+                let sortedVideoAndAudio = candidates.sorted { lhs, rhs in
+                    let lhsIsVideo = lhs.mediaType == .video ? 1 : 0
+                    let rhsIsVideo = rhs.mediaType == .video ? 1 : 0
+                    if lhsIsVideo != rhsIsVideo {
+                        return lhsIsVideo > rhsIsVideo
+                    }
+                    return lhs.score > rhs.score
+                }
+
+                for cand in sortedVideoAndAudio where optionSeenUrls.insert(cand.url).inserted {
+                    let isHighest: Bool
+                    if cand.mediaType == .video && !markedHighestVideo {
+                        markedHighestVideo = true
+                        isHighest = true
+                    } else {
+                        isHighest = false
+                    }
+                    let resolvedAudioUrl: String?
+                    if let directAudio = cand.audioUrl {
+                        resolvedAudioUrl = directAudio
+                    } else if let vid = cand.videoId, let byVid = globalAudioByVideoId[vid] {
+                        resolvedAudioUrl = byVid
+                    } else if cand.mediaType == .video && isFacebookDashVideoOnlyUrl(cand.url) {
+                        resolvedAudioUrl = fallbackDashAudioUrl
+                    } else {
+                        resolvedAudioUrl = nil
+                    }
+                    options.append(
+                        MediaOption(
+                            url: cand.url,
+                            qualityLabel: cand.label,
+                            fileExtension: cand.fileExtension,
+                            mediaType: cand.mediaType,
+                            isHighestQuality: isHighest,
+                            isNoWatermark: true,
+                            customHeaders: fbHeaders,
+                            audioUrl: resolvedAudioUrl
+                        )
+                    )
+                }
+            }
+
+            if hasMultipleVideos, let audUrl = fallbackDashAudioUrl, optionSeenUrls.insert(audUrl).inserted {
+                options.append(
+                    MediaOption(
+                        url: audUrl,
+                        qualityLabel: "Âm thanh gốc (M4A)",
+                        fileExtension: "m4a",
+                        mediaType: .audio,
+                        isHighestQuality: false,
+                        isNoWatermark: true,
+                        customHeaders: fbHeaders
+                    )
+                )
+            }
+
+            if ogImageUrl.lowercased().hasPrefix("http") && optionSeenUrls.insert(ogImageUrl).inserted {
+                options.append(
+                    MediaOption(
+                        url: ogImageUrl,
+                        qualityLabel: "Ảnh bìa (Cover)",
+                        fileExtension: "jpg",
+                        mediaType: .image,
+                        isHighestQuality: options.isEmpty,
+                        isNoWatermark: true,
+                        customHeaders: fbHeaders
+                    )
+                )
+            }
+
+            let shortVid: String = {
+                if let vid = targetVideoId, !vid.isEmpty {
+                    return String(vid.suffix(4))
+                }
+                if let tok = urlStoryTokens.first, !tok.isEmpty {
+                    return String(normalizeFacebookStoryCardKey(tok).suffix(4))
+                }
+                let h = abs(finalResolvedUrl.hashValue) % 10_000
+                return String(format: "%04d", h)
+            }()
+
+            let isStory = finalResolvedUrl.lowercased().contains("/stories/")
+            let defaultFallbackTitle: String
+            if isStory && !detectedAuthor.isEmpty {
+                defaultFallbackTitle = "Story của \(detectedAuthor) (#\(shortVid))"
+            } else if isStory {
+                defaultFallbackTitle = "Facebook Story (#\(shortVid))"
+            } else if !detectedAuthor.isEmpty {
+                defaultFallbackTitle = "Video của \(detectedAuthor) (#\(shortVid))"
+            } else {
+                defaultFallbackTitle = "Video Facebook (#\(shortVid))"
+            }
+
+            let validOgTitle: String = {
+                let trimmed = ogTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty,
+                      trimmed.caseInsensitiveCompare("Facebook") != .orderedSame,
+                      !trimmed.lowercased().contains("log into facebook") else {
+                    return ""
+                }
+                return trimmed
+            }()
+
+            let rawChosenTitle = firstNonEmpty(validOgTitle, ogDescription, defaultFallbackTitle)
+            if (rawChosenTitle.hasPrefix("Story của ") ||
+                rawChosenTitle.hasPrefix("Facebook Story") ||
+                rawChosenTitle.hasPrefix("Video của ") ||
+                rawChosenTitle == "Video Facebook") && !rawChosenTitle.contains("(#") {
+                safeTitle = "\(rawChosenTitle) (#\(shortVid))"
+            } else {
+                safeTitle = rawChosenTitle
+            }
         }
 
         guard !options.isEmpty else { return nil }
-
-        let resolvedAuthor = detectedAuthor.isEmpty ? "Facebook" : detectedAuthor
-        let isStory = finalResolvedUrl.lowercased().contains("/stories/")
-        let defaultFallbackTitle: String
-        if isStory && !detectedAuthor.isEmpty {
-            defaultFallbackTitle = "Story của \(detectedAuthor)"
-        } else if isStory {
-            defaultFallbackTitle = "Facebook Story"
-        } else if !detectedAuthor.isEmpty {
-            defaultFallbackTitle = "Video của \(detectedAuthor)"
-        } else {
-            defaultFallbackTitle = "Video Facebook"
-        }
-
-        let validOgTitle: String = {
-            let trimmed = ogTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty,
-                  trimmed.caseInsensitiveCompare("Facebook") != .orderedSame,
-                  !trimmed.lowercased().contains("log into facebook") else {
-                return ""
-            }
-            return trimmed
-        }()
-
-        let safeTitle = firstNonEmpty(validOgTitle, ogDescription, defaultFallbackTitle)
 
         return ExtractedMediaInfo(
             originalUrl: originalInput,
@@ -2353,10 +2825,20 @@ final class MultiPlatformExtractor {
                     } else {
                         username = "Instagram"
                     }
-                    let captionText = firstRegexMatch(
+                    let rawCaption = firstRegexMatch(
                         pattern: #""caption"\s*:\s*\{[^{}]*"text"\s*:\s*"([^"]+)""#,
                         in: unescapedApi
-                    )?.group(1) ?? "Instagram Full HD Media"
+                    )?.group(1)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let shortId = String(mediaId.suffix(4))
+                    let isIgStory = cleanUrl.lowercased().contains("/stories/")
+                    let captionText: String
+                    if !rawCaption.isEmpty {
+                        captionText = rawCaption
+                    } else if isIgStory {
+                        captionText = "Story Instagram của \(username) (#\(shortId))"
+                    } else {
+                        captionText = "Instagram Full HD Media (#\(shortId))"
+                    }
 
                     let sortedCands = versionCandidates.sorted { lhs, rhs in
                         let lv = lhs.mediaType == .video ? 1 : 0
@@ -2524,17 +3006,28 @@ final class MultiPlatformExtractor {
                 displayUrlFallback
             )
 
-            let title = firstNonEmpty(
-                extractMetaContent(html: rawHtml, property: "og:title"),
-                extractHtmlTagTitle(rawHtml),
-                "Instagram Media \(shortcode ?? "")".trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-
             let username: String
             if let uname = firstRegexMatch(pattern: #""username"\s*:\s*"([^"]+)""#, in: unescaped)?.group(1), !uname.isEmpty {
                 username = "@\(uname)"
             } else {
                 username = "Instagram"
+            }
+
+            let rawTitle = firstNonEmpty(
+                extractMetaContent(html: rawHtml, property: "og:title"),
+                extractHtmlTagTitle(rawHtml)
+            )
+            let shortId = String((mediaId ?? shortcode ?? String(abs(cleanUrl.hashValue))).suffix(4))
+            let isIgStory = cleanUrl.lowercased().contains("/stories/")
+            let title: String
+            if !rawTitle.isEmpty &&
+               rawTitle.caseInsensitiveCompare("Instagram") != .orderedSame &&
+               !rawTitle.lowercased().contains("watch this story") {
+                title = isIgStory && !rawTitle.contains("(#") ? "\(rawTitle) (#\(shortId))" : rawTitle
+            } else if isIgStory {
+                title = "Story Instagram của \(username) (#\(shortId))"
+            } else {
+                title = "Instagram Media \(shortcode ?? "(#\(shortId))")".trimmingCharacters(in: .whitespacesAndNewlines)
             }
 
             var options: [MediaOption] = []
@@ -3162,37 +3655,103 @@ final class MultiPlatformExtractor {
         }
     }
 
+    private func extractResolvedFacebookUrlFromHtml(_ html: String) -> String? {
+        guard !html.isEmpty else { return nil }
+        let unescaped = unescapeHtmlAndJson(html)
+        if let storyUrl = firstRegexMatch(
+            pattern: #"https://(?:www\.|m\.|web\.)?facebook\.com/stories/[^/?#"'\s<>]+/UzpfSVNDOj[A-Za-z0-9+/=%_-]+"#,
+            in: unescaped,
+            options: [.caseInsensitive]
+        )?.fullMatch {
+            return sanitizeCandidateUrl(storyUrl)
+        }
+        let ogUrl = extractMetaContent(html: html, property: "og:url")
+        if ogUrl.lowercased().hasPrefix("http") &&
+           !ogUrl.lowercased().contains("/share/") &&
+           !ogUrl.lowercased().contains("fb.watch") {
+            return unwrapFacebookLoginRedirect(ogUrl)
+        }
+        if let canonical = firstRegexMatch(
+            pattern: #"<link[^>]+rel\s*=\s*["']canonical["'][^>]+href\s*=\s*["']([^"']+)["']"#,
+            in: html,
+            options: [.caseInsensitive]
+        )?.group(1),
+           canonical.lowercased().hasPrefix("http"),
+           !canonical.lowercased().contains("/share/"),
+           !canonical.lowercased().contains("fb.watch") {
+            return unwrapFacebookLoginRedirect(unescapeHtmlAndJson(canonical))
+        }
+        return nil
+    }
+
     private func resolveRedirectUrl(_ url: String, userAgent: String) async -> String {
         guard let requestUrl = URL(string: url) else { return url }
         let platform = UrlDetector.detectPlatform(url)
         let rawCookie = AuthCookieStore.shared.getEffectiveCookie(for: platform, targetUrl: url)
         let effectiveCookie = platform == .facebook ? buildDesktopFacebookCookie(rawCookie) : rawCookie
 
-        var request = URLRequest(url: requestUrl)
-        request.httpMethod = "GET"
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            forHTTPHeaderField: "Accept"
-        )
-        request.setValue("en-US,en;q=0.9,vi;q=0.8", forHTTPHeaderField: "Accept-Language")
-        request.setValue("document", forHTTPHeaderField: "Sec-Fetch-Dest")
-        request.setValue("navigate", forHTTPHeaderField: "Sec-Fetch-Mode")
-        request.setValue("none", forHTTPHeaderField: "Sec-Fetch-Site")
-        request.setValue("1", forHTTPHeaderField: "Upgrade-Insecure-Requests")
-        if !effectiveCookie.isEmpty {
-            request.setValue(effectiveCookie, forHTTPHeaderField: "Cookie")
+        func makeRedirectRequest(includeCookie: Bool) -> URLRequest {
+            var req = URLRequest(url: requestUrl)
+            req.httpMethod = "GET"
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                forHTTPHeaderField: "Accept"
+            )
+            req.setValue("en-US,en;q=0.9,vi;q=0.8", forHTTPHeaderField: "Accept-Language")
+            req.setValue("document", forHTTPHeaderField: "Sec-Fetch-Dest")
+            req.setValue("navigate", forHTTPHeaderField: "Sec-Fetch-Mode")
+            req.setValue("none", forHTTPHeaderField: "Sec-Fetch-Site")
+            req.setValue("1", forHTTPHeaderField: "Upgrade-Insecure-Requests")
+            if includeCookie && !effectiveCookie.isEmpty {
+                req.setValue(effectiveCookie, forHTTPHeaderField: "Cookie")
+            }
+            return req
         }
 
+        var resolvedUrl = url
         do {
-            let (_, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: makeRedirectRequest(includeCookie: true))
             if let finalUrl = response.url?.absoluteString {
-                return unwrapFacebookLoginRedirect(finalUrl)
+                resolvedUrl = unwrapFacebookLoginRedirect(finalUrl)
+            }
+            let lowerResolved = resolvedUrl.lowercased()
+            if lowerResolved.contains("/share/") || lowerResolved.contains("fb.watch") {
+                let html = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+                if let extracted = extractResolvedFacebookUrlFromHtml(html) {
+                    resolvedUrl = extracted
+                }
             }
         } catch {
-            return url
+            resolvedUrl = url
         }
-        return url
+
+        // Crucial Fallback: Logged-in Facebook Comet SPA sometimes serves `/share/` with HTTP 200 without redirecting
+        // the URL to `/stories/<bucket>/<UzpfSVNDOj...>`. Probing WITHOUT Cookie triggers an immediate 302 redirect
+        // to the canonical `/stories/<bucket>/<UzpfSVNDOj...>` (or `/login/?next=...` which unwraps to it).
+        let stillUnresolved = resolvedUrl.lowercased().contains("/share/") || resolvedUrl.lowercased().contains("fb.watch")
+        if stillUnresolved && !effectiveCookie.isEmpty {
+            do {
+                let (noCookieData, noCookieResp) = try await session.data(for: makeRedirectRequest(includeCookie: false))
+                if let secondFinal = noCookieResp.url?.absoluteString {
+                    let unwrappedSecond = unwrapFacebookLoginRedirect(secondFinal)
+                    let lowerSecond = unwrappedSecond.lowercased()
+                    if !lowerSecond.contains("/share/") &&
+                       !lowerSecond.contains("fb.watch") &&
+                       !lowerSecond.contains("/login") {
+                        return unwrappedSecond
+                    }
+                }
+                let secondHtml = String(data: noCookieData, encoding: .utf8) ?? String(decoding: noCookieData, as: UTF8.self)
+                if let extractedSecond = extractResolvedFacebookUrlFromHtml(secondHtml) {
+                    return extractedSecond
+                }
+            } catch {
+                // Keep resolvedUrl
+            }
+        }
+
+        return resolvedUrl
     }
 
     private func extractCookieValue(from cookie: String, name: String) -> String? {

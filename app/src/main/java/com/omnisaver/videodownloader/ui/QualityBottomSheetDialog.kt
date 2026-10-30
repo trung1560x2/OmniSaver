@@ -36,6 +36,7 @@ import java.util.concurrent.TimeUnit
 class QualityBottomSheetDialog(
     context: Context,
     private val mediaInfo: ExtractedMediaInfo,
+    private val onBatchSelected: ((List<MediaOption>) -> Unit)? = null,
     private val onOptionSelected: (MediaOption) -> Unit
 ) : BottomSheetDialog(context) {
 
@@ -105,6 +106,23 @@ class QualityBottomSheetDialog(
     }
 
     private fun setupOptionsList(root: View) {
+        val btnDownloadAllBatch = root.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnDownloadAllBatch)
+        val batchOptions = mediaInfo.batchDownloadOptions()
+        if (batchOptions.size >= 2 && btnDownloadAllBatch != null) {
+            btnDownloadAllBatch.visibility = View.VISIBLE
+            btnDownloadAllBatch.text = "TẢI TẤT CẢ ${batchOptions.size} STORY / VIDEO (FULL HD)"
+            btnDownloadAllBatch.setOnClickListener {
+                if (onBatchSelected != null) {
+                    onBatchSelected.invoke(batchOptions)
+                } else {
+                    batchOptions.forEach { opt -> onOptionSelected(opt) }
+                }
+                dismiss()
+            }
+        } else if (btnDownloadAllBatch != null) {
+            btnDownloadAllBatch.visibility = View.GONE
+        }
+
         val rvOptions = root.findViewById<RecyclerView>(R.id.rvQualityOptions)
         rvOptions.layoutManager = LinearLayoutManager(context)
         rvOptions.adapter = QualityOptionAdapter(

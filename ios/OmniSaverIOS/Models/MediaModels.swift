@@ -117,6 +117,29 @@ struct ExtractedMediaInfo: Identifiable, Hashable {
     var bestOption: MediaOption? {
         options.first(where: { $0.isHighestQuality }) ?? options.first
     }
+
+    var batchDownloadOptions: [MediaOption] {
+        let pattern = #"(?:Story|Slide|Video|Ảnh(?:\s*gốc)?(?:\s*HD)?)\s*#(\d+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+        var bestByIndex: [Int: MediaOption] = [:]
+        for option in options {
+            let label = option.qualityLabel
+            let nsRange = NSRange(label.startIndex..<label.endIndex, in: label)
+            guard let match = regex.firstMatch(in: label, options: [], range: nsRange),
+                  match.numberOfRanges >= 2,
+                  let idxRange = Range(match.range(at: 1), in: label),
+                  let idx = Int(label[idxRange]) else {
+                continue
+            }
+            if bestByIndex[idx] == nil {
+                bestByIndex[idx] = option
+            }
+        }
+        guard bestByIndex.count >= 2 else { return [] }
+        return bestByIndex.keys.sorted().compactMap { bestByIndex[$0] }
+    }
 }
 
 struct DownloadedItem: Identifiable, Codable, Hashable {

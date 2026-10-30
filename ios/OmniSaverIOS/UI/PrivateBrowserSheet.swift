@@ -38,6 +38,7 @@ final class PrivateBrowserViewModel: NSObject, ObservableObject {
     func switchPlatform(_ platform: SocialPlatform) {
         selectedPlatform = platform
         cookieSynced = AuthCookieStore.shared.hasCookie(for: platform)
+        sniffedUrls.removeAll()
         loadUrlString(platform.loginUrl)
     }
 
@@ -56,6 +57,7 @@ final class PrivateBrowserViewModel: NSObject, ObservableObject {
         }
 
         guard let url = URL(string: target) else { return }
+        sniffedUrls.removeAll()
         addressText = target
         currentUrl = target
         let detected = UrlDetector.detectPlatform(target)

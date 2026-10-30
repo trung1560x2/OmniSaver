@@ -728,9 +728,16 @@ class PrivateBrowserActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                QualityBottomSheetDialog(this@PrivateBrowserActivity, mediaInfo) { selectedOption ->
-                    startDownloadInBrowser(mediaInfo, selectedOption)
-                }.show()
+                QualityBottomSheetDialog(
+                    context = this@PrivateBrowserActivity,
+                    mediaInfo = mediaInfo,
+                    onBatchSelected = { batchOptions ->
+                        batchOptions.forEach { opt -> startDownloadInBrowser(mediaInfo, opt) }
+                    },
+                    onOptionSelected = { selectedOption ->
+                        startDownloadInBrowser(mediaInfo, selectedOption)
+                    }
+                ).show()
             }
         }
     }

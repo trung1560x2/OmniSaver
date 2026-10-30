@@ -83,7 +83,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:singleLine="true"
-                        android:text="v2.4.0 • Full HD &amp; OTA Ready"
+                        android:text="v2.5.0 • Full HD &amp; OTA Ready"
                         android:textColor="#CBD5E1"
                         android:textSize="11sp" />
 

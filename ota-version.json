@@ -1,11 +1,11 @@
 {
-    "versionCode":  7,
-    "versionName":  "2.4.0-FullHD",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.4.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.apk",
-    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.4.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa",
-    "changelog":  "• Sửa triệt để lỗi tải video Facebook Full HD 1080p không có âm thanh (tích hợp bộ ghép kênh ISO-BMFF Fragmented MP4 Muxer hỗ trợ mọi chuẩn nén video AV1 av01, VP9 vp09, H.264 avc1, HEVC hvc1 kèm âm thanh gốc HE-AAC mp4a.40.5)\n• Đảm bảo mọi luồng video DASH 1080p / 720p luôn tự động gắn kèm luồng âm thanh gốc M4A khi tải về\n• Nâng cấp giải mã chuẩn chất lượng NextGen DASH (_q90 = 1080p, _q80 = 720p) chính xác 100%",
-    "publishedAt":  "2026-10-28",
-    "fileSizeBytes":  5366074,
-    "sha256":  "bc64c791b2d02ceb497e1c05e3f0ad825a965098a4ad88025db2da71e24924fd",
+    "versionCode":  8,
+    "versionName":  "2.5.0-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.5.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.apk",
+    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.5.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa",
+    "changelog":  "• Sửa triệt để lỗi dán link Story/Video mới của cùng một người nhưng vẫn tải lại video cũ hoặc giữ tên cũ (cô lập ranh giới từng thẻ Story UzpfSVNDOj... và giải mã redirect /share/ chính xác 100%)\n• Tự động bóc tách trọn bộ tất cả các Story (cả Video Full HD 1080p kèm âm thanh gốc lẫn Ảnh Story HD) đang có của người đó\n• Bổ sung nút \u0027Tải tất cả X Story / Video (Full HD)\u0027 trên cả iOS và Android giúp tải toàn bộ Story của một người chỉ với 1 chạm\n• Mỗi Story và Video có mã định danh #ID và tên tệp riêng biệt, không bao giờ bị trùng lặp",
+    "publishedAt":  "2026-10-30",
+    "fileSizeBytes":  5377134,
+    "sha256":  "6d46443bce6c7b8fb25746c69309aa7bd19d6f439798923ab476e2423879c05f",
     "forceUpdate":  false
 }

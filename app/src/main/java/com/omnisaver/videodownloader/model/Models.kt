@@ -48,7 +48,33 @@ data class ExtractedMediaInfo(
     val thumbnailUrl: String,
     val durationSeconds: Long = 0L,
     val options: List<MediaOption>
-)
+) {
+    /**
+     * Returns the best (highest quality) [MediaOption] for each distinct Story / Slide / Video index
+     * (`Story #1`, `Story #2`, `Ảnh Slide #1`, `Video #1`, etc.) when the extracted media contains
+     * 2 or more distinct stories/slides in a bucket or carousel.
+     */
+    fun batchDownloadOptions(): List<MediaOption> {
+        val itemIndexRegex = Regex(
+            """(?:Story|Slide|Video|Ảnh(?:\s*gốc)?(?:\s*HD)?)\s*#(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+        val bestByIndex = LinkedHashMap<Int, MediaOption>()
+        for (option in options) {
+            if (option.mediaType == MediaType.AUDIO) continue
+            val match = itemIndexRegex.find(option.qualityLabel) ?: continue
+            val idx = match.groupValues.getOrNull(1)?.toIntOrNull() ?: continue
+            if (!bestByIndex.containsKey(idx)) {
+                bestByIndex[idx] = option
+            }
+        }
+        return if (bestByIndex.size >= 2) {
+            bestByIndex.entries.sortedBy { it.key }.map { it.value }
+        } else {
+            emptyList()
+        }
+    }
+}
 
 data class DownloadedFileItem(
     val filePath: String,

@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'GitHub Release tag to attach the IPA to (e.g. v2.4.0-FullHD)'
+        description: 'GitHub Release tag to attach the IPA to (e.g. v2.5.0-FullHD)'
         required: false
-        default: 'v2.4.0-FullHD'
+        default: 'v2.5.0-FullHD'
 
 permissions:
   contents: write
@@ -61,14 +61,14 @@ jobs:
           rm -rf Payload
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/OmniSaverIOS.app
-          zip -qry OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa Payload
-          ls -lh OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa
+          zip -qry OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa Payload
+          ls -lh OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OmniSaver_iOS27_LiquidGlass_v2.4_FullHD_IPA
-          path: ios/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa
+          name: OmniSaver_iOS27_LiquidGlass_v2.5_FullHD_IPA
+          path: ios/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa
           if-no-files-found: error
 
       - name: Attach IPA to GitHub Release
@@ -77,8 +77,8 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.release_tag }}"
           if [ -z "$TAG" ]; then
-            TAG="v2.4.0-FullHD"
+            TAG="v2.5.0-FullHD"
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" ios/OmniSaver_iOS27_LiquidGlass_v2.4_FullHD.ipa --clobber
+            gh release upload "$TAG" ios/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa --clobber
           fi

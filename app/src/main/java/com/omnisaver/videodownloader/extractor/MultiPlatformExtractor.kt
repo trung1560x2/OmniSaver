@@ -855,7 +855,15 @@ class MultiPlatformExtractor(private val context: Context) {
         val score: Int,
         val mediaType: MediaType = MediaType.VIDEO,
         val extension: String = "mp4",
-        val audioUrl: String? = null
+        val audioUrl: String? = null,
+        val videoId: String? = null
+    )
+
+    private data class StoryBucketGroup(
+        val key: String,
+        val rawToken: String,
+        var videoId: String? = null,
+        val candidates: MutableList<ScoredStreamCandidate> = mutableListOf()
     )
 
     /**
@@ -1001,16 +1009,74 @@ class MultiPlatformExtractor(private val context: Context) {
     }
 
     private fun unwrapFacebookLoginRedirect(url: String): String {
-        if (url.contains("/login", ignoreCase = true) && url.contains("next=", ignoreCase = true)) {
-            val nextParam = Regex("""[?&]next=([^&#]+)""").find(url)?.groupValues?.getOrNull(1)
-            if (!nextParam.isNullOrBlank()) {
-                val decoded = runCatching { URLDecoder.decode(nextParam, "UTF-8") }.getOrNull()
-                if (!decoded.isNullOrBlank() && decoded.startsWith("http", ignoreCase = true)) {
-                    return decoded
+        var current = url
+        repeat(3) {
+            val lower = current.lowercase(Locale.ROOT)
+            val paramRegex = when {
+                lower.contains("/login") && lower.contains("next=") -> Regex("""[?&]next=([^&#]+)""", RegexOption.IGNORE_CASE)
+                lower.contains("l.facebook.com/l.php") && lower.contains("u=") -> Regex("""[?&]u=([^&#]+)""", RegexOption.IGNORE_CASE)
+                else -> null
+            } ?: return current
+
+            val encodedTarget = paramRegex.find(current)?.groupValues?.getOrNull(1)
+            if (encodedTarget.isNullOrBlank()) return current
+            val decoded = runCatching { URLDecoder.decode(encodedTarget, "UTF-8") }.getOrNull()
+            if (!decoded.isNullOrBlank() && decoded.startsWith("http", ignoreCase = true)) {
+                current = decoded
+            } else {
+                return current
+            }
+        }
+        return current
+    }
+
+    private fun normalizeFacebookStoryCardKey(rawToken: String): String {
+        val trimmed = rawToken.trim()
+        if (trimmed.isEmpty()) return ""
+        val urlDecoded = runCatching { URLDecoder.decode(trimmed, "UTF-8") }.getOrDefault(trimmed)
+        if (urlDecoded.all(Char::isDigit) && urlDecoded.length >= 8) {
+            return "ISC_$urlDecoded"
+        }
+        val decodedNum = runCatching {
+            val cleanB64 = urlDecoded.trimEnd('=')
+            val padded = cleanB64 + "=".repeat((4 - cleanB64.length % 4) % 4)
+            val bytes = try {
+                Base64.decode(padded, Base64.DEFAULT)
+            } catch (_: Exception) {
+                Base64.decode(padded, Base64.URL_SAFE)
+            }
+            val decodedStr = String(bytes, Charsets.UTF_8)
+            Regex("""(\d{8,22})""").find(decodedStr)?.groupValues?.getOrNull(1)
+        }.getOrNull()
+        return if (!decodedNum.isNullOrBlank()) {
+            "ISC_$decodedNum"
+        } else {
+            urlDecoded.trimEnd('=')
+        }
+    }
+
+    private fun extractFacebookPhotoStoryUrlFromSlice(slice: String): String? {
+        val photoPatterns = listOf(
+            Regex(""""viewer_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""""),
+            Regex(""""photo_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""""),
+            Regex(""""__typename"\s*:\s*"Photo"[\s\S]{0,1200}?"image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)"""")
+        )
+        for (pattern in photoPatterns) {
+            for (m in pattern.findAll(slice)) {
+                val rawUri = m.groupValues.getOrNull(1) ?: continue
+                val cleaned = sanitizeCandidateUrl(rawUri)
+                val lower = cleaned.lowercase(Locale.ROOT)
+                if (cleaned.startsWith("http", ignoreCase = true) &&
+                    !lower.contains("p50x50") &&
+                    !lower.contains("s50x50") &&
+                    !lower.contains("p100x100") &&
+                    !lower.contains("s100x100")
+                ) {
+                    return cleaned
                 }
             }
         }
-        return url
+        return null
     }
 
     private fun toDesktopFacebookUrl(url: String): String {
@@ -1037,11 +1103,6 @@ class MultiPlatformExtractor(private val context: Context) {
         return (filtered + listOf("wd=1920x1080", "dpr=2")).joinToString("; ")
     }
 
-    /**
-     * Parses Facebook progressive_urls (including nested `"metadata":{"quality":"HD"}`),
-     * DASH `<Representation><BaseURL>` manifests (`1080p`, `720p` + paired AAC audio track),
-     * and Relay JSON DASH `"representations"` from any unescaped HTML/JSON slice.
-     */
     private fun extractFacebookStreamsFromSlice(
         region: String,
         isTargetSlice: Boolean,
@@ -1099,7 +1160,6 @@ class MultiPlatformExtractor(private val context: Context) {
         }
 
         // 3. Parse DASH Manifest XML (`manifest_xml` / `dash_manifest_xml_string` `<Representation ...><BaseURL>...</BaseURL>`)
-        // Unescape `\"` and `\n` inside JSON-encoded XML strings so XML attributes can be parsed cleanly
         val xmlReady = region
             .replace("""\"""", "\"")
             .replace("""\n""", "\n")
@@ -1115,8 +1175,9 @@ class MultiPlatformExtractor(private val context: Context) {
         )
 
         var bestDashAudioUrl: String? = null
+        val audioByVideoId = LinkedHashMap<String, String>()
 
-        // Pre-scan Relay JSON `"base_url"` audio representations so `bestDashAudioUrl` is always known
+        // Pre-scan Relay JSON `"base_url"` audio representations so `bestDashAudioUrl` and `audioByVideoId` are populated
         val jsonBaseUrlRegex = Regex(""""base_url"\s*:\s*"(https?:[^"]+)"""")
         val jsonBaseMatches = jsonBaseUrlRegex.findAll(region).toList()
         for (jm in jsonBaseMatches) {
@@ -1132,6 +1193,9 @@ class MultiPlatformExtractor(private val context: Context) {
                 if (bestDashAudioUrl == null) {
                     bestDashAudioUrl = cleanedUrl
                 }
+                if (!efg.videoId.isNullOrBlank() && !audioByVideoId.containsKey(efg.videoId)) {
+                    audioByVideoId[efg.videoId] = cleanedUrl
+                }
                 register(cleanedUrl, "Âm thanh gốc (M4A)", 110, isTargetSlice, null)
             }
         }
@@ -1140,7 +1204,7 @@ class MultiPlatformExtractor(private val context: Context) {
             val repMatches = repRegex.findAll(mpdBlock).toList()
             if (repMatches.isEmpty()) continue
 
-            // First pass per MPD: find the highest-bitrate DASH Audio track (`audio/mp4` / `mp4a`) for THIS video
+            // First pass per MPD: find the highest-bitrate DASH Audio track (`audio/mp4` / `mp4a`) for THIS MPD block
             var mpdAudioUrl: String? = null
             var mpdAudioBandwidth = -1L
 
@@ -1158,6 +1222,9 @@ class MultiPlatformExtractor(private val context: Context) {
                         mpdAudioBandwidth = bw
                         mpdAudioUrl = cleanedUrl
                     }
+                    if (!efg.videoId.isNullOrBlank()) {
+                        audioByVideoId[efg.videoId] = cleanedUrl
+                    }
                     if (bestDashAudioUrl == null) {
                         bestDashAudioUrl = cleanedUrl
                     }
@@ -1165,7 +1232,7 @@ class MultiPlatformExtractor(private val context: Context) {
                 }
             }
 
-            // Second pass per MPD: register DASH Video `<Representation>` tracks paired with `mpdAudioUrl`
+            // Second pass per MPD: register DASH Video `<Representation>` tracks paired with their exact `videoId` audio or `mpdAudioUrl`
             for (rm in repMatches) {
                 val attrs = rm.groupValues[1]
                 val rawBaseUrl = rm.groupValues[2]
@@ -1183,7 +1250,6 @@ class MultiPlatformExtractor(private val context: Context) {
                 val height = Regex("""\bheight\s*=\s*"(\d+)"""").find(attrs)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
                 val shortSide = if (width > 0 && height > 0) minOf(width, height) else maxOf(width, height)
 
-                // Both `avc1`/`hvc1` and `av01`/`vp09` are supported by our ISO-BMFF fMP4 de-fragmenting muxer!
                 val isAvcOrHevc = attrs.contains("avc1", ignoreCase = true) ||
                     attrs.contains("hvc1", ignoreCase = true) ||
                     attrs.contains("hev1", ignoreCase = true)
@@ -1199,7 +1265,8 @@ class MultiPlatformExtractor(private val context: Context) {
                     attrs.contains("FBQualityClass=\"hd\"", ignoreCase = true) -> "Full HD 1080p/720p (MP4)" to (980 + codecBonus)
                     else -> "SD Video (MP4)" to 360
                 }
-                register(cleanedUrl, dashLabel, dashScore, isTargetSlice, mpdAudioUrl ?: bestDashAudioUrl)
+                val exactAudio = efg.videoId?.let { audioByVideoId[it] } ?: mpdAudioUrl ?: bestDashAudioUrl
+                register(cleanedUrl, dashLabel, dashScore, isTargetSlice, exactAudio)
             }
         }
 
@@ -1224,15 +1291,12 @@ class MultiPlatformExtractor(private val context: Context) {
             if (res >= 720) {
                 val label = if (res >= 1080) "Full HD 1080p (MP4)" else "HD 720p (MP4)"
                 val score = (if (res >= 1080) 1150 else 950) + codecBonus
-                register(cleanedUrl, label, score, isTargetSlice, bestDashAudioUrl)
+                val exactAudio = efg.videoId?.let { audioByVideoId[it] } ?: bestDashAudioUrl
+                register(cleanedUrl, label, score, isTargetSlice, exactAudio)
             }
         }
     }
 
-    /**
-     * Facebook direct Desktop Comet Relay + progressive_urls + DASH 1080p Mux + efg VideoID extractor
-     * (supports Full HD 1080p/720p on Private, Friends, Closed Group, Reels & Story videos with Cookie).
-     */
     private fun extractFacebookDirect(
         originalInput: String,
         cleanUrl: String,
@@ -1256,72 +1320,40 @@ class MultiPlatformExtractor(private val context: Context) {
         var targetVideoId: String? = hintVideoId ?: extractFacebookVideoIdFromText(finalResolvedUrl)
 
         val videoRedirectRegex = Regex("""/video_redirect/\?src=([^"&'\s<>]+)""")
+        val uzpfTokenRegex = Regex("""UzpfSVNDOj[A-Za-z0-9+/=_-]+""")
 
         val candidates = mutableListOf<ScoredStreamCandidate>()
         val seenUrls = mutableSetOf<String>()
+        val storyGroups = mutableListOf<StoryBucketGroup>()
+        val storyGroupByKey = LinkedHashMap<String, StoryBucketGroup>()
+
         var ogVideoUrl = ""
         var ogImageUrl = ""
         var ogTitle = ""
         var ogDescription = ""
         var detectedAuthor = ""
 
-        fun registerCandidateUrl(
+        fun buildScoredCandidate(
             rawCandidate: String?,
             defaultLabel: String,
             defaultScore: Int,
             isTargetSlice: Boolean = false,
             pairedAudioUrl: String? = null
-        ) {
-            val cleaned = sanitizeCandidateUrl(rawCandidate ?: return)
-            if (!cleaned.startsWith("http", ignoreCase = true)) return
+        ): ScoredStreamCandidate? {
+            val cleaned = sanitizeCandidateUrl(rawCandidate ?: return null)
+            if (!cleaned.startsWith("http", ignoreCase = true)) return null
 
             val efgMeta = inspectFacebookStreamUrl(cleaned)
-            // Filter out streams that explicitly belong to a different video on the same page/bucket
-            if (
-                !isTargetSlice &&
-                targetVideoId != null &&
-                !efgMeta.videoId.isNullOrBlank() &&
-                efgMeta.videoId != targetVideoId &&
-                candidates.any { it.mediaType == MediaType.VIDEO }
-            ) {
-                return
-            }
-
-            if (!seenUrls.add(cleaned)) {
-                val existingIdx = candidates.indexOfFirst { it.url == cleaned }
-                if (existingIdx >= 0) {
-                    val existing = candidates[existingIdx]
-                    val bonus = if (isTargetSlice || (targetVideoId != null && efgMeta.videoId == targetVideoId)) 250 else 0
-                    val candidateScore = max(defaultScore, efgMeta.resolutionScore) + bonus
-                    val newAudio = existing.audioUrl ?: pairedAudioUrl
-                    val newScore = max(existing.score, candidateScore)
-                    val newLabel = if (candidateScore > existing.score) defaultLabel else existing.label
-                    if (newAudio != existing.audioUrl || newScore != existing.score) {
-                        candidates[existingIdx] = existing.copy(
-                            label = newLabel,
-                            score = newScore,
-                            audioUrl = newAudio
-                        )
-                    }
-                }
-                return
-            }
-
-            if (targetVideoId == null && !efgMeta.videoId.isNullOrBlank()) {
-                targetVideoId = efgMeta.videoId
-            }
-
             if (efgMeta.isAudioOnly) {
-                candidates.add(
-                    ScoredStreamCandidate(
-                        url = cleaned,
-                        label = "Âm thanh gốc (M4A)",
-                        score = 100,
-                        mediaType = MediaType.AUDIO,
-                        extension = "m4a"
-                    )
+                return ScoredStreamCandidate(
+                    url = cleaned,
+                    label = "Âm thanh gốc (M4A)",
+                    score = 100,
+                    mediaType = MediaType.AUDIO,
+                    extension = "m4a",
+                    audioUrl = null,
+                    videoId = efgMeta.videoId
                 )
-                return
             }
 
             val bonus = if (isTargetSlice || (targetVideoId != null && efgMeta.videoId == targetVideoId)) 250 else 0
@@ -1334,67 +1366,201 @@ class MultiPlatformExtractor(private val context: Context) {
                 else -> efgMeta.qualityLabel ?: defaultLabel
             }
 
-            candidates.add(
-                ScoredStreamCandidate(
-                    url = cleaned,
-                    label = effectiveLabel,
-                    score = effectiveScore,
-                    mediaType = MediaType.VIDEO,
-                    extension = "mp4",
-                    audioUrl = pairedAudioUrl
-                )
+            return ScoredStreamCandidate(
+                url = cleaned,
+                label = effectiveLabel,
+                score = effectiveScore,
+                mediaType = MediaType.VIDEO,
+                extension = "mp4",
+                audioUrl = pairedAudioUrl,
+                videoId = efgMeta.videoId
             )
+        }
+
+        fun mergeCandidateIntoList(
+            list: MutableList<ScoredStreamCandidate>,
+            incoming: ScoredStreamCandidate
+        ) {
+            val existingIdx = list.indexOfFirst { it.url == incoming.url }
+            if (existingIdx >= 0) {
+                val existing = list[existingIdx]
+                val newAudio = existing.audioUrl ?: incoming.audioUrl
+                val newVid = existing.videoId ?: incoming.videoId
+                val newScore = max(existing.score, incoming.score)
+                val newLabel = if (incoming.score > existing.score) incoming.label else existing.label
+                list[existingIdx] = existing.copy(
+                    label = newLabel,
+                    score = newScore,
+                    audioUrl = newAudio,
+                    videoId = newVid
+                )
+            } else {
+                list.add(incoming)
+            }
+        }
+
+        fun registerCandidateUrl(
+            rawCandidate: String?,
+            defaultLabel: String,
+            defaultScore: Int,
+            isTargetSlice: Boolean = false,
+            pairedAudioUrl: String? = null
+        ) {
+            val built = buildScoredCandidate(
+                rawCandidate = rawCandidate,
+                defaultLabel = defaultLabel,
+                defaultScore = defaultScore,
+                isTargetSlice = isTargetSlice,
+                pairedAudioUrl = pairedAudioUrl
+            ) ?: return
+
+            seenUrls.add(built.url)
+            if (targetVideoId == null && !built.videoId.isNullOrBlank() && isTargetSlice) {
+                targetVideoId = built.videoId
+            }
+            mergeCandidateIntoList(candidates, built)
+
+            // If this stream has a videoId matching one of the discovered Story Cards, enrich that Story Card too!
+            if (!built.videoId.isNullOrBlank()) {
+                val matchingGroup = storyGroups.firstOrNull { it.videoId == built.videoId }
+                if (matchingGroup != null) {
+                    mergeCandidateIntoList(matchingGroup.candidates, built.copy(score = built.score.coerceAtMost(1200)))
+                }
+            }
         }
 
         fun parseFacebookHtml(html: String) {
             val unescaped = unescapeHtmlAndJson(html)
             val storyTokens = extractFacebookStoryTokens(finalResolvedUrl)
+            val targetStoryKeys = storyTokens.map { normalizeFacebookStoryCardKey(it) }
+                .filter { it.isNotBlank() }
+                .toSet()
 
-            // 1. If this is a Facebook Story (`/stories/<bucket>/<storyToken>`), locate the exact Story card slice first!
-            val targetSlices = mutableListOf<String>()
-            for (token in storyTokens) {
-                var idx = unescaped.indexOf(token)
-                var count = 0
-                while (idx >= 0 && count < 3) {
-                    val start = (idx - 25000).coerceAtLeast(0)
-                    val end = (idx + 65000).coerceAtMost(unescaped.length)
-                    val slice = unescaped.substring(start, end)
-                    targetSlices.add(slice)
-                    if (targetVideoId == null) {
-                        targetVideoId = extractFacebookVideoIdFromText(slice)
+            // 1. Segment Story Bucket by `UzpfSVNDOj...` Story Card boundaries!
+            // Each Story Card slice starts at `match.range.first - 200` (NEVER -25000, which bled into Story #1!)
+            // and stops at the first subsequent `UzpfSVNDOj...` match that belongs to a DIFFERENT Story Card!
+            val uzpfMatches = uzpfTokenRegex.findAll(unescaped).toList()
+            if (uzpfMatches.isNotEmpty()) {
+                val matchKeys = uzpfMatches.map { normalizeFacebookStoryCardKey(it.value) }
+                for (i in uzpfMatches.indices) {
+                    val m = uzpfMatches[i]
+                    val cardKey = matchKeys[i]
+                    if (cardKey.isBlank()) continue
+
+                    var nextDifferentStart: Int? = null
+                    for (j in (i + 1) until uzpfMatches.size) {
+                        if (matchKeys[j] != cardKey) {
+                            nextDifferentStart = uzpfMatches[j].range.first
+                            break
+                        }
                     }
-                    idx = unescaped.indexOf(token, idx + token.length)
-                    count++
+
+                    val sliceStart = (m.range.first - 200).coerceAtLeast(0)
+                    val maxEnd = (m.range.last + 1 + 45_000).coerceAtMost(unescaped.length)
+                    val sliceEnd = nextDifferentStart?.let { minOf(maxEnd, it) } ?: maxEnd
+                    if (sliceEnd <= sliceStart) continue
+
+                    val cardSlice = unescaped.substring(sliceStart, sliceEnd)
+                    val sliceStreams = mutableListOf<ScoredStreamCandidate>()
+                    val isTargetCard = cardKey in targetStoryKeys
+
+                    extractFacebookStreamsFromSlice(cardSlice, isTargetCard) { u, lbl, sc, _, audUrl ->
+                        val built = buildScoredCandidate(
+                            rawCandidate = u,
+                            defaultLabel = lbl,
+                            defaultScore = sc,
+                            isTargetSlice = false,
+                            pairedAudioUrl = audUrl
+                        )
+                        if (built != null) {
+                            mergeCandidateIntoList(sliceStreams, built)
+                        }
+                    }
+
+                    if (sliceStreams.none { it.mediaType == MediaType.VIDEO }) {
+                        val photoUri = extractFacebookPhotoStoryUrlFromSlice(cardSlice)
+                        if (!photoUri.isNullOrBlank()) {
+                            mergeCandidateIntoList(
+                                sliceStreams,
+                                ScoredStreamCandidate(
+                                    url = photoUri,
+                                    label = "Ảnh Story HD (JPG)",
+                                    score = 900,
+                                    mediaType = MediaType.IMAGE,
+                                    extension = "jpg"
+                                )
+                            )
+                        }
+                    }
+
+                    if (sliceStreams.any { it.mediaType == MediaType.VIDEO || it.mediaType == MediaType.IMAGE }) {
+                        val group = storyGroupByKey.getOrPut(cardKey) {
+                            StoryBucketGroup(key = cardKey, rawToken = m.value).also { storyGroups.add(it) }
+                        }
+                        if (group.videoId == null) {
+                            group.videoId = sliceStreams.firstNotNullOfOrNull { it.videoId }
+                                ?: extractFacebookVideoIdFromText(cardSlice)
+                        }
+                        for (sc in sliceStreams) {
+                            mergeCandidateIntoList(group.candidates, sc)
+                            registerCandidateUrl(sc.url, sc.label, sc.score, isTargetCard, sc.audioUrl)
+                        }
+                    }
                 }
             }
 
-            if (targetVideoId == null) {
+            // Update `targetVideoId` from the exact matched Story Card if present
+            val matchedGroup = storyGroups.firstOrNull {
+                it.key in targetStoryKeys || (!hintVideoId.isNullOrBlank() && it.videoId == hintVideoId)
+            }
+            if (matchedGroup != null && !matchedGroup.videoId.isNullOrBlank()) {
+                targetVideoId = matchedGroup.videoId
+            }
+
+            // 2. Fallback tight slice scan when `storyGroups` is empty
+            val targetSlices = mutableListOf<String>()
+            if (storyGroups.isEmpty()) {
+                for (token in storyTokens) {
+                    var idx = unescaped.indexOf(token)
+                    var count = 0
+                    while (idx >= 0 && count < 3) {
+                        val start = (idx - 200).coerceAtLeast(0)
+                        val end = (idx + 18_000).coerceAtMost(unescaped.length)
+                        val slice = unescaped.substring(start, end)
+                        targetSlices.add(slice)
+                        if (targetVideoId == null) {
+                            targetVideoId = extractFacebookVideoIdFromText(slice)
+                        }
+                        idx = unescaped.indexOf(token, idx + token.length)
+                        count++
+                    }
+                }
+            }
+
+            if (targetVideoId == null && storyGroups.isEmpty()) {
                 targetVideoId = extractFacebookVideoIdFromText(unescaped)
             }
 
-            // 2. Also add slices around `targetVideoId`
             val vid = targetVideoId
             if (!vid.isNullOrBlank()) {
                 var searchIdx = unescaped.indexOf(vid)
                 var count = 0
                 while (searchIdx >= 0 && count < 4) {
-                    val start = (searchIdx - 25000).coerceAtLeast(0)
-                    val end = (searchIdx + 65000).coerceAtMost(unescaped.length)
+                    val start = (searchIdx - 4_000).coerceAtLeast(0)
+                    val end = (searchIdx + 35_000).coerceAtMost(unescaped.length)
                     targetSlices.add(unescaped.substring(start, end))
                     searchIdx = unescaped.indexOf(vid, searchIdx + vid.length)
                     count++
                 }
             }
 
-            // Scan target slices first
             for (slice in targetSlices) {
                 extractFacebookStreamsFromSlice(slice, true) { u, lbl, sc, isT, audUrl ->
                     registerCandidateUrl(u, lbl, sc, isT, audUrl)
                 }
             }
 
-            // Only scan the full page if target slices did not yield an HD video stream
-            if (candidates.none { it.mediaType == MediaType.VIDEO && it.score >= 720 }) {
+            if (storyGroups.isEmpty() && candidates.none { it.mediaType == MediaType.VIDEO && it.score >= 720 }) {
                 extractFacebookStreamsFromSlice(unescaped, false) { u, lbl, sc, isT, audUrl ->
                     registerCandidateUrl(u, lbl, sc, isT, audUrl)
                 }
@@ -1419,7 +1585,6 @@ class MultiPlatformExtractor(private val context: Context) {
             if (ogImageUrl.isBlank()) {
                 ogImageUrl = extractMetaContent(html, "og:image")
                     .ifBlank {
-                        // Supports nested `{"preferred_thumbnail":{"image":{"uri":"https://..."}}}`
                         Regex(""""preferred_thumbnail"\s*:\s*\{.{0,180}?"uri"\s*:\s*"(https?:[^"]+)"""")
                             .find(unescaped)?.groupValues?.getOrNull(1).orEmpty()
                     }
@@ -1508,7 +1673,7 @@ class MultiPlatformExtractor(private val context: Context) {
             }
         }
 
-        // 2. If still no HD video (e.g., private group permalink or story), probe mbasic/m.facebook.com to discover video_id or stream
+        // 2. If still no HD video (e.g., private group permalink or story), probe mbasic/m.facebook.com
         val hasHdVideo = candidates.any { it.mediaType == MediaType.VIDEO && it.score >= 720 }
         val videoIdBeforeMobile = targetVideoId
         if (!hasHdVideo) {
@@ -1551,8 +1716,7 @@ class MultiPlatformExtractor(private val context: Context) {
                 parseFacebookHtml(fallbackHtml)
             }
 
-            // 3. Second-stage HD Upgrade: if mbasic/mobile revealed a new `targetVideoId` (or resolved a `/share/` URL to `/stories/`),
-            // immediately query Desktop www.facebook.com to pull the 1080p/720p Full HD stream!
+            // 3. Second-stage HD Upgrade: if mbasic/mobile revealed a new `targetVideoId`, query Desktop www.facebook.com
             val newlyDiscoveredVid = targetVideoId
             val hdUpgradeUrls = buildList {
                 if (!finalResolvedUrl.contains("/share/")) {
@@ -1583,45 +1747,189 @@ class MultiPlatformExtractor(private val context: Context) {
             registerCandidateUrl(ogVideoUrl, "HD Video (MP4)", 720, false, null)
         }
 
-        val fallbackDashAudioUrl = candidates.firstOrNull { it.mediaType == MediaType.AUDIO }?.url
+        val options = mutableListOf<MediaOption>()
+        val finalTargetStoryKeys = extractFacebookStoryTokens(finalResolvedUrl)
+            .map { normalizeFacebookStoryCardKey(it) }
+            .filter { it.isNotBlank() }
+            .toSet()
 
-        val sortedVideoAndAudio = candidates
-            .sortedWith(
+        if (storyGroups.isNotEmpty()) {
+            val targetIdx = storyGroups.indexOfFirst { it.key in finalTargetStoryKeys }.takeIf { it >= 0 }
+                ?: storyGroups.indexOfFirst { !targetVideoId.isNullOrBlank() && it.videoId == targetVideoId }.takeIf { it >= 0 }
+                ?: 0
+            val totalStories = storyGroups.size
+            val primaryGroup = storyGroups[targetIdx]
+            val primaryGroupAudio = primaryGroup.candidates.firstOrNull { it.mediaType == MediaType.AUDIO }?.url
+
+            val primarySorted = primaryGroup.candidates
+                .filter { it.mediaType != MediaType.AUDIO }
+                .sortedWith(
+                    compareByDescending<ScoredStreamCandidate> { it.mediaType == MediaType.VIDEO }
+                        .thenByDescending { it.score }
+                )
+
+            var markedHighest = false
+            for (cand in primarySorted) {
+                val isHighest = if (!markedHighest) {
+                    markedHighest = true
+                    true
+                } else {
+                    false
+                }
+                val resolvedAudio = cand.audioUrl ?: if (
+                    cand.mediaType == MediaType.VIDEO && isFacebookDashVideoOnlyUrl(cand.url)
+                ) {
+                    primaryGroupAudio
+                } else {
+                    null
+                }
+                val prefix = if (totalStories > 1) {
+                    "Story #${targetIdx + 1} (Link này) • "
+                } else {
+                    "Story #1 • "
+                }
+                options.add(
+                    MediaOption(
+                        url = cand.url,
+                        qualityLabel = "$prefix${cand.label}",
+                        extension = cand.extension,
+                        mediaType = cand.mediaType,
+                        isHighestQuality = isHighest,
+                        isNoWatermark = true,
+                        customHeaders = fbHeaders,
+                        audioUrl = resolvedAudio
+                    )
+                )
+            }
+
+            // Include the best Full HD option of EVERY OTHER Story in this person's Story Bucket!
+            if (totalStories > 1) {
+                for (idx in storyGroups.indices) {
+                    if (idx == targetIdx) continue
+                    val group = storyGroups[idx]
+                    val groupAudio = group.candidates.firstOrNull { it.mediaType == MediaType.AUDIO }?.url
+                    val bestCand = group.candidates
+                        .filter { it.mediaType != MediaType.AUDIO }
+                        .maxWithOrNull(
+                            compareBy<ScoredStreamCandidate> { it.mediaType == MediaType.VIDEO }
+                                .thenBy { it.score }
+                        ) ?: continue
+
+                    val resolvedAudio = bestCand.audioUrl ?: if (
+                        bestCand.mediaType == MediaType.VIDEO && isFacebookDashVideoOnlyUrl(bestCand.url)
+                    ) {
+                        groupAudio
+                    } else {
+                        null
+                    }
+                    options.add(
+                        MediaOption(
+                            url = bestCand.url,
+                            qualityLabel = "Story #${idx + 1} • ${bestCand.label}",
+                            extension = bestCand.extension,
+                            mediaType = bestCand.mediaType,
+                            isHighestQuality = false,
+                            isNoWatermark = true,
+                            customHeaders = fbHeaders,
+                            audioUrl = resolvedAudio
+                        )
+                    )
+                }
+            }
+
+            if (!primaryGroupAudio.isNullOrBlank()) {
+                options.add(
+                    MediaOption(
+                        url = primaryGroupAudio,
+                        qualityLabel = "Âm thanh gốc Story #${targetIdx + 1} (M4A)",
+                        extension = "m4a",
+                        mediaType = MediaType.AUDIO,
+                        isHighestQuality = false,
+                        isNoWatermark = true,
+                        customHeaders = fbHeaders
+                    )
+                )
+            }
+        } else {
+            val audioByVid = LinkedHashMap<String, String>()
+            candidates.filter { it.mediaType == MediaType.AUDIO }.forEach { aud ->
+                if (!aud.videoId.isNullOrBlank() && !audioByVid.containsKey(aud.videoId)) {
+                    audioByVid[aud.videoId] = aud.url
+                }
+            }
+            val fallbackDashAudioUrl = targetVideoId?.let { audioByVid[it] }
+                ?: candidates.firstOrNull { it.mediaType == MediaType.AUDIO }?.url
+
+            // Separate primary video candidates vs secondary videos on the same page
+            val primaryCandidates = candidates.filter {
+                it.mediaType == MediaType.AUDIO ||
+                    targetVideoId == null ||
+                    it.videoId == null ||
+                    it.videoId == targetVideoId
+            }.ifEmpty { candidates }
+
+            val secondaryByVid = candidates
+                .filter { it.mediaType == MediaType.VIDEO && !it.videoId.isNullOrBlank() && targetVideoId != null && it.videoId != targetVideoId }
+                .groupBy { it.videoId!! }
+
+            val sortedPrimary = primaryCandidates.sortedWith(
                 compareByDescending<ScoredStreamCandidate> { it.mediaType == MediaType.VIDEO }
                     .thenByDescending { it.score }
             )
 
-        val options = mutableListOf<MediaOption>()
-        var markedHighestVideo = false
-        for (cand in sortedVideoAndAudio) {
-            val isHighest = if (cand.mediaType == MediaType.VIDEO && !markedHighestVideo) {
-                markedHighestVideo = true
-                true
-            } else {
-                false
-            }
-            val resolvedAudioUrl = cand.audioUrl ?: if (
-                cand.mediaType == MediaType.VIDEO && isFacebookDashVideoOnlyUrl(cand.url)
-            ) {
-                fallbackDashAudioUrl
-            } else {
-                null
-            }
-            options.add(
-                MediaOption(
-                    url = cand.url,
-                    qualityLabel = cand.label,
-                    extension = cand.extension,
-                    mediaType = cand.mediaType,
-                    isHighestQuality = isHighest,
-                    isNoWatermark = true,
-                    customHeaders = fbHeaders,
-                    audioUrl = resolvedAudioUrl
+            var markedHighestVideo = false
+            for (cand in sortedPrimary) {
+                val isHighest = if (cand.mediaType == MediaType.VIDEO && !markedHighestVideo) {
+                    markedHighestVideo = true
+                    true
+                } else {
+                    false
+                }
+                val resolvedAudioUrl = cand.audioUrl
+                    ?: cand.videoId?.let { audioByVid[it] }
+                    ?: if (cand.mediaType == MediaType.VIDEO && isFacebookDashVideoOnlyUrl(cand.url)) {
+                        fallbackDashAudioUrl
+                    } else {
+                        null
+                    }
+                val prefix = if (secondaryByVid.isNotEmpty() && cand.mediaType == MediaType.VIDEO) "Video #1 • " else ""
+                options.add(
+                    MediaOption(
+                        url = cand.url,
+                        qualityLabel = "$prefix${cand.label}",
+                        extension = cand.extension,
+                        mediaType = cand.mediaType,
+                        isHighestQuality = isHighest,
+                        isNoWatermark = true,
+                        customHeaders = fbHeaders,
+                        audioUrl = resolvedAudioUrl
+                    )
                 )
-            )
+            }
+
+            var extraIdx = 2
+            for ((vidKey, vidList) in secondaryByVid) {
+                val bestExtra = vidList.maxByOrNull { it.score } ?: continue
+                val resolvedAudioUrl = bestExtra.audioUrl
+                    ?: audioByVid[vidKey]
+                    ?: if (isFacebookDashVideoOnlyUrl(bestExtra.url)) fallbackDashAudioUrl else null
+                options.add(
+                    MediaOption(
+                        url = bestExtra.url,
+                        qualityLabel = "Video #$extraIdx • ${bestExtra.label}",
+                        extension = bestExtra.extension,
+                        mediaType = MediaType.VIDEO,
+                        isHighestQuality = false,
+                        isNoWatermark = true,
+                        customHeaders = fbHeaders,
+                        audioUrl = resolvedAudioUrl
+                    )
+                )
+                extraIdx++
+            }
         }
 
-        if (ogImageUrl.startsWith("http", ignoreCase = true) && seenUrls.add(ogImageUrl)) {
+        if (ogImageUrl.startsWith("http", ignoreCase = true) && options.none { it.url == ogImageUrl }) {
             options.add(
                 MediaOption(
                     url = ogImageUrl,
@@ -1638,17 +1946,41 @@ class MultiPlatformExtractor(private val context: Context) {
         if (options.isEmpty()) return null
 
         val resolvedAuthor = detectedAuthor.ifBlank { "Facebook" }
-        val isStory = finalResolvedUrl.contains("/stories/", ignoreCase = true)
-        val defaultFallbackTitle = when {
-            isStory && detectedAuthor.isNotBlank() -> "Story của $detectedAuthor"
-            isStory -> "Facebook Story"
-            detectedAuthor.isNotBlank() -> "Video của $detectedAuthor"
-            else -> "Video Facebook"
+        val isStory = finalResolvedUrl.contains("/stories/", ignoreCase = true) || storyGroups.isNotEmpty()
+        val hasExplicitTarget = finalTargetStoryKeys.isNotEmpty() || !hintVideoId.isNullOrBlank()
+        val targetStoryIdx = if (storyGroups.isNotEmpty()) {
+            (storyGroups.indexOfFirst { it.key in finalTargetStoryKeys }.takeIf { it >= 0 }
+                ?: storyGroups.indexOfFirst { !targetVideoId.isNullOrBlank() && it.videoId == targetVideoId }.takeIf { it >= 0 }
+                ?: 0)
+        } else {
+            0
         }
+        val activeShortId = (
+            storyGroups.getOrNull(targetStoryIdx)?.videoId
+                ?: targetVideoId
+                ?: storyGroups.getOrNull(targetStoryIdx)?.key?.removePrefix("ISC_")
+                ?: options.first().url.substringBefore('?').hashCode().toUInt().toString()
+            ).takeLast(4)
 
-        val safeTitle = ogTitle.takeIf {
-            it.isNotBlank() && !it.equals("Facebook", ignoreCase = true) && !it.contains("Log into Facebook", ignoreCase = true)
-        } ?: ogDescription.takeIf { it.isNotBlank() } ?: defaultFallbackTitle
+        val safeTitle = when {
+            storyGroups.size > 1 && hasExplicitTarget ->
+                "Story #${targetStoryIdx + 1}/${storyGroups.size} của $resolvedAuthor (#$activeShortId)"
+            storyGroups.size > 1 ->
+                "Trọn bộ ${storyGroups.size} Story của $resolvedAuthor (#$activeShortId)"
+            isStory && detectedAuthor.isNotBlank() ->
+                "Story của $detectedAuthor (#$activeShortId)"
+            isStory ->
+                "Facebook Story (#$activeShortId)"
+            else -> {
+                val baseTitle = ogTitle.takeIf {
+                    it.isNotBlank() &&
+                        !it.equals("Facebook", ignoreCase = true) &&
+                        !it.contains("Log into Facebook", ignoreCase = true)
+                } ?: ogDescription.takeIf { it.isNotBlank() }
+                    ?: if (detectedAuthor.isNotBlank()) "Video của $detectedAuthor" else "Video Facebook"
+                if (baseTitle.contains(activeShortId)) baseTitle else "$baseTitle (#$activeShortId)"
+            }
+        }
 
         return ExtractedMediaInfo(
             originalUrl = originalInput,
@@ -1716,10 +2048,6 @@ class MultiPlatformExtractor(private val context: Context) {
         return results.sortedByDescending { it.score }
     }
 
-    /**
-     * Instagram direct API v1 (`i.instagram.com/api/v1/media/<id>/info/`) + embed / page extractor
-     * (supports Full HD 1080p on Private Accounts, Reels, Carousels & Stories with sessionid).
-     */
     private fun extractInstagramDirect(originalInput: String, cleanUrl: String): ExtractedMediaInfo? {
         val cookie = authCookieStore.getEffectiveCookie(SocialPlatform.INSTAGRAM, cleanUrl)
         val igHeaders = buildMediaHeaders(SocialPlatform.INSTAGRAM, cookie)
@@ -1727,12 +2055,13 @@ class MultiPlatformExtractor(private val context: Context) {
         val shortcodeMatch = Regex("""/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)""").find(cleanUrl)
         val shortcode = shortcodeMatch?.groupValues?.getOrNull(1)
         val storyPkMatch = Regex("""/stories/[^/]+/(\d{10,25})""").find(cleanUrl)
-        val mediaId = storyPkMatch?.groupValues?.getOrNull(1)
-            ?: shortcode?.let { instagramShortcodeToMediaId(it) }
+        val storyPk = storyPkMatch?.groupValues?.getOrNull(1)
+        val mediaId = storyPk ?: shortcode?.let { instagramShortcodeToMediaId(it) }
+        val shortIgId = (mediaId ?: shortcode ?: cleanUrl.hashCode().toUInt().toString()).takeLast(4)
 
         val hasSessionId = cookie.contains("sessionid=")
 
-        // 1. If logged in and mediaId is known, query Instagram Mobile API v1 for true 1080p Full HD video_versions
+        // 1. If logged in and mediaId is known, query Instagram Mobile API v1 for true 1080p Full HD video_versions & DASH
         if (hasSessionId && !mediaId.isNullOrBlank()) {
             val apiEndpoints = listOf(
                 "https://i.instagram.com/api/v1/media/$mediaId/info/",
@@ -1755,7 +2084,26 @@ class MultiPlatformExtractor(private val context: Context) {
                 }.getOrNull() ?: continue
 
                 val unescapedApi = unescapeHtmlAndJson(apiBody)
-                val versionCandidates = extractInstagramVideoVersionsFromText(unescapedApi)
+                val versionCandidates = extractInstagramVideoVersionsFromText(unescapedApi).toMutableList()
+                val seenUrls = versionCandidates.map { it.url }.toMutableSet()
+
+                extractFacebookStreamsFromSlice(unescapedApi, true) { u, lbl, sc, _, audUrl ->
+                    val cleaned = sanitizeCandidateUrl(u ?: return@extractFacebookStreamsFromSlice)
+                    if (cleaned.startsWith("http", ignoreCase = true) && seenUrls.add(cleaned)) {
+                        val mt = if (lbl.contains("M4A", ignoreCase = true)) MediaType.AUDIO else MediaType.VIDEO
+                        versionCandidates.add(
+                            ScoredStreamCandidate(
+                                url = cleaned,
+                                label = lbl,
+                                score = sc,
+                                mediaType = mt,
+                                extension = if (mt == MediaType.AUDIO) "m4a" else "mp4",
+                                audioUrl = audUrl
+                            )
+                        )
+                    }
+                }
+
                 if (versionCandidates.isNotEmpty()) {
                     val thumb = Regex(""""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)"""")
                         .find(unescapedApi)?.groupValues?.getOrNull(1)?.let { sanitizeCandidateUrl(it) }.orEmpty()
@@ -1764,17 +2112,29 @@ class MultiPlatformExtractor(private val context: Context) {
                     val captionText = Regex(""""caption"\s*:\s*\{[^{}]*"text"\s*:\s*"([^"]+)"""")
                         .find(unescapedApi)?.groupValues?.getOrNull(1)
                         ?.takeIf { it.isNotBlank() }
-                        ?: "Instagram Full HD Media"
+                        ?: if (!storyPk.isNullOrBlank()) "Story Instagram của $username (#$shortIgId)" else "Video Instagram của $username (#$shortIgId)"
 
-                    val options = versionCandidates.mapIndexed { index, cand ->
+                    val sortedCands = versionCandidates.sortedWith(
+                        compareByDescending<ScoredStreamCandidate> { it.mediaType == MediaType.VIDEO }
+                            .thenByDescending { it.score }
+                    )
+                    var markedHighest = false
+                    val options = sortedCands.map { cand ->
+                        val isHighest = if (cand.mediaType == MediaType.VIDEO && !markedHighest) {
+                            markedHighest = true
+                            true
+                        } else {
+                            false
+                        }
                         MediaOption(
                             url = cand.url,
                             qualityLabel = cand.label,
-                            extension = "mp4",
-                            mediaType = MediaType.VIDEO,
-                            isHighestQuality = (index == 0),
+                            extension = cand.extension,
+                            mediaType = cand.mediaType,
+                            isHighestQuality = isHighest,
                             isNoWatermark = true,
-                            customHeaders = igHeaders
+                            customHeaders = igHeaders,
+                            audioUrl = cand.audioUrl
                         )
                     }.toMutableList()
 
@@ -1855,6 +2215,23 @@ class MultiPlatformExtractor(private val context: Context) {
                 }
             }
 
+            extractFacebookStreamsFromSlice(unescaped, true) { u, lbl, sc, _, audUrl ->
+                val cleaned = sanitizeCandidateUrl(u ?: return@extractFacebookStreamsFromSlice)
+                if (cleaned.startsWith("http", ignoreCase = true) && seenVideoUrls.add(cleaned)) {
+                    val mt = if (lbl.contains("M4A", ignoreCase = true)) MediaType.AUDIO else MediaType.VIDEO
+                    scoredVideos.add(
+                        ScoredStreamCandidate(
+                            url = cleaned,
+                            label = lbl,
+                            score = sc,
+                            mediaType = mt,
+                            extension = if (mt == MediaType.AUDIO) "m4a" else "mp4",
+                            audioUrl = audUrl
+                        )
+                    )
+                }
+            }
+
             Regex(""""video_url"\s*:\s*"([^"]+)"""").findAll(unescaped).forEach { m ->
                 val u = sanitizeCandidateUrl(m.groupValues.getOrNull(1).orEmpty())
                 if (u.startsWith("http", ignoreCase = true) && seenVideoUrls.add(u)) {
@@ -1877,27 +2254,39 @@ class MultiPlatformExtractor(private val context: Context) {
                         .find(unescaped)?.groupValues?.getOrNull(1)?.let { sanitizeCandidateUrl(it) }.orEmpty()
                 }
 
-            val title = extractMetaContent(rawHtml, "og:title")
-                .ifBlank { extractHtmlTagTitle(rawHtml) }
-                .ifBlank { "Instagram Media ${shortcode.orEmpty()}".trim() }
-
             val username = Regex(""""username"\s*:\s*"([^"]+)"""")
                 .find(unescaped)?.groupValues?.getOrNull(1)
                 ?.let { "@$it" }
                 ?: "Instagram"
 
+            val rawTitle = extractMetaContent(rawHtml, "og:title")
+                .ifBlank { extractHtmlTagTitle(rawHtml) }
+                .ifBlank { "Instagram Media $username".trim() }
+            val title = if (rawTitle.contains(shortIgId)) rawTitle else "$rawTitle (#$shortIgId)"
+
             val options = mutableListOf<MediaOption>()
-            val sortedVideos = scoredVideos.sortedByDescending { it.score }
-            sortedVideos.forEachIndexed { idx, cand ->
+            val sortedVideos = scoredVideos.sortedWith(
+                compareByDescending<ScoredStreamCandidate> { it.mediaType == MediaType.VIDEO }
+                    .thenByDescending { it.score }
+            )
+            var markedHighest = false
+            sortedVideos.forEach { cand ->
+                val isHighest = if (cand.mediaType == MediaType.VIDEO && !markedHighest) {
+                    markedHighest = true
+                    true
+                } else {
+                    false
+                }
                 options.add(
                     MediaOption(
                         url = cand.url,
                         qualityLabel = cand.label,
-                        extension = "mp4",
-                        mediaType = MediaType.VIDEO,
-                        isHighestQuality = (idx == 0),
+                        extension = cand.extension,
+                        mediaType = cand.mediaType,
+                        isHighestQuality = isHighest,
                         isNoWatermark = true,
-                        customHeaders = igHeaders
+                        customHeaders = igHeaders,
+                        audioUrl = cand.audioUrl
                     )
                 )
             }
@@ -2045,11 +2434,6 @@ class MultiPlatformExtractor(private val context: Context) {
         )
     }
 
-    /**
-     * Parses raw HTML and sniffed media URLs captured from `PrivateBrowserActivity` WebView,
-     * AND automatically upgrades to 1080p/720p Full HD via Desktop/API extraction using any
-     * video_id discovered in the page or inside the `efg=` metadata of sniffed streams!
-     */
     fun parseHtmlAndSniffedUrls(
         rawHtml: String,
         pageUrl: String,
@@ -2062,10 +2446,27 @@ class MultiPlatformExtractor(private val context: Context) {
         val customHeaders = buildMediaHeaders(platform, cookie)
 
         val unescaped = unescapeHtmlAndJson(rawHtml)
+        val isFacebookStoryUrl = platform == SocialPlatform.FACEBOOK && cleanUrl.contains("/stories/", ignoreCase = true)
+
+        // IMPORTANT: For `/stories/` URLs, do NOT initialize `discoveredFbVideoId` from `extractFacebookVideoIdFromText(unescaped)`
+        // because the whole-page HTML contains the entire Story Bucket starting with Story #1!
+        var discoveredFbVideoId: String? = extractFacebookVideoIdFromText(cleanUrl)
+            ?: if (!isFacebookStoryUrl) extractFacebookVideoIdFromText(unescaped) else null
+
+        // If this is a Facebook Story URL, run `extractFacebookDirect` first so Story Card boundary isolation
+        // and multi-story bucket options (`Story #1`, `Story #2`, ...) are preserved intact!
+        if (isFacebookStoryUrl) {
+            val activeSniffedVid = sniffedUrls.firstOrNull()?.let { inspectFacebookStreamUrl(it).videoId }
+            val storyDirectInfo = runCatching {
+                extractFacebookDirect(pageUrl, cleanUrl, activeSniffedVid)
+            }.getOrNull()
+            if (storyDirectInfo != null && storyDirectInfo.options.isNotEmpty()) {
+                return storyDirectInfo
+            }
+        }
+
         val candidates = mutableListOf<ScoredStreamCandidate>()
         val seenUrls = mutableSetOf<String>()
-        var discoveredFbVideoId: String? = extractFacebookVideoIdFromText(cleanUrl)
-            ?: extractFacebookVideoIdFromText(unescaped)
 
         fun addCandidate(
             rawCandidateUrl: String?,
@@ -2108,7 +2509,8 @@ class MultiPlatformExtractor(private val context: Context) {
                             label = "Âm thanh gốc (M4A)",
                             score = 100,
                             mediaType = MediaType.AUDIO,
-                            extension = "m4a"
+                            extension = "m4a",
+                            videoId = efgMeta.videoId
                         )
                     )
                     return
@@ -2127,7 +2529,8 @@ class MultiPlatformExtractor(private val context: Context) {
                         score = resolvedScore,
                         mediaType = MediaType.VIDEO,
                         extension = extension,
-                        audioUrl = pairedAudioUrl
+                        audioUrl = pairedAudioUrl,
+                        videoId = efgMeta.videoId
                     )
                 )
             } else {
@@ -2219,9 +2622,7 @@ class MultiPlatformExtractor(private val context: Context) {
             addCandidate(match.groupValues.getOrNull(1), "Video Trình Duyệt (MP4)", 380)
         }
 
-        // 5. AUTOMATIC DESKTOP FULL HD UPGRADE:
-        // Mobile WebViews (`m.facebook.com`, etc.) only load 360p SD in the DOM.
-        // We now invoke the Desktop/API Full HD extractor using `cleanUrl` and `discoveredFbVideoId`!
+        // 5. AUTOMATIC DESKTOP FULL HD UPGRADE
         val desktopUpgradeInfo = runCatching {
             when (platform) {
                 SocialPlatform.FACEBOOK -> {
@@ -2482,6 +2883,64 @@ class MultiPlatformExtractor(private val context: Context) {
         } else {
             rawCookie
         }
+
+        fun extractStoryOrCanonicalFromHtml(html: String): String? {
+            if (html.isBlank()) return null
+            val unescaped = unescapeHtmlAndJson(html.take(120_000))
+            val storyUrlMatch = Regex(
+                """https?://(?:www\.|m\.|web\.)?facebook\.com/stories/[^/?#"'\s<>]+/UzpfSVNDOj[A-Za-z0-9+/=%_-]+/?""",
+                RegexOption.IGNORE_CASE
+            ).find(unescaped)?.value
+            if (!storyUrlMatch.isNullOrBlank()) return storyUrlMatch
+
+            val ogUrl = extractMetaContent(html, "og:url")
+            if (ogUrl.startsWith("http", ignoreCase = true) && !ogUrl.contains("/share/", ignoreCase = true)) {
+                return unwrapFacebookLoginRedirect(ogUrl)
+            }
+            val canonical = Regex(
+                """<link[^>]+rel\s*=\s*["']canonical["'][^>]+href\s*=\s*["']([^"']+)["']""",
+                RegexOption.IGNORE_CASE
+            ).find(html)?.groupValues?.getOrNull(1)
+            if (!canonical.isNullOrBlank() && canonical.startsWith("http", ignoreCase = true) && !canonical.contains("/share/", ignoreCase = true)) {
+                return unwrapFacebookLoginRedirect(canonical)
+            }
+            return null
+        }
+
+        // 1. Try unauthenticated redirect first for Facebook `/share/` links because logged-out `/share/`
+        // always issues an HTTP 302 redirect to the exact `/stories/<bucket>/<UzpfSVNDOj...>` or `/reel/<id>` URL
+        // (or `/login/?next=https%3A%2F%2Fwww.facebook.com%2Fstories%2F...` which `unwrapFacebookLoginRedirect` unwraps!)
+        if (platform == SocialPlatform.FACEBOOK &&
+            (url.contains("/share/", ignoreCase = true) || url.contains("fb.watch", ignoreCase = true))
+        ) {
+            val noCookieUrl = runCatching {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", userAgent)
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .header("Accept-Language", "en-US,en;q=0.9,vi;q=0.8")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    val unwrapped = unwrapFacebookLoginRedirect(resp.request.url.toString())
+                    if (!unwrapped.contains("/share/", ignoreCase = true) && !unwrapped.contains("/login", ignoreCase = true)) {
+                        unwrapped
+                    } else {
+                        val html = resp.body?.string().orEmpty()
+                        extractStoryOrCanonicalFromHtml(html) ?: unwrapped
+                    }
+                }
+            }.getOrNull()
+
+            if (!noCookieUrl.isNullOrBlank() &&
+                !noCookieUrl.contains("/share/", ignoreCase = true) &&
+                !noCookieUrl.contains("/login", ignoreCase = true)
+            ) {
+                return noCookieUrl
+            }
+        }
+
+        // 2. Try with effective cookie
         val reqBuilder = Request.Builder()
             .url(url)
             .header("User-Agent", userAgent)
@@ -2500,7 +2959,13 @@ class MultiPlatformExtractor(private val context: Context) {
         }
         return runCatching {
             httpClient.newCall(reqBuilder.build()).execute().use { resp ->
-                unwrapFacebookLoginRedirect(resp.request.url.toString())
+                val unwrapped = unwrapFacebookLoginRedirect(resp.request.url.toString())
+                if (!unwrapped.contains("/share/", ignoreCase = true)) {
+                    unwrapped
+                } else {
+                    val bodyStr = resp.body?.string().orEmpty()
+                    extractStoryOrCanonicalFromHtml(bodyStr) ?: unwrapped
+                }
             }
         }.getOrDefault(url)
     }

@@ -432,10 +432,88 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showQualityBottomSheet(mediaInfo: ExtractedMediaInfo) {
-        val dialog = QualityBottomSheetDialog(this, mediaInfo) { selectedOption ->
-            requestPermissionsAndDownload(mediaInfo, selectedOption)
-        }
+        val dialog = QualityBottomSheetDialog(
+            context = this,
+            mediaInfo = mediaInfo,
+            onBatchSelected = { batchOptions ->
+                startBatchDownloadNow(mediaInfo, batchOptions)
+            },
+            onOptionSelected = { selectedOption ->
+                requestPermissionsAndDownload(mediaInfo, selectedOption)
+            }
+        )
         dialog.show()
+    }
+
+    private fun startBatchDownloadNow(mediaInfo: ExtractedMediaInfo, options: List<MediaOption>) {
+        if (options.isEmpty()) return
+        cardCompleted.visibility = View.GONE
+        cardDownloadProgress.visibility = View.VISIBLE
+
+        activeProgressJob?.cancel()
+        activeProgressJob = lifecycleScope.launch {
+            var completedCount = 0
+            var lastCompletedFile: File? = null
+            var lastOption: MediaOption = options.first()
+
+            for ((idx, option) in options.withIndex()) {
+                val fileName = omniDownloadManager.buildFileName(mediaInfo, option)
+                val targetFile = omniDownloadManager.getTargetFile(mediaInfo, fileName)
+                if (targetFile.exists() && targetFile.length() > 0L) {
+                    completedCount++
+                    lastCompletedFile = targetFile
+                    lastOption = option
+                    continue
+                }
+
+                val downloadId = try {
+                    omniDownloadManager.enqueueDownload(mediaInfo, option, fileName)
+                } catch (_: Exception) {
+                    continue
+                }
+
+                val stepLabel = "[${idx + 1}/${options.size}] $fileName"
+                tvDownloadingFileName.text = stepLabel
+                tvDownloadPercent.text = "0%"
+                progressBarDownload.progress = 0
+
+                omniDownloadManager.observeDownloadProgress(downloadId, mediaInfo, option, fileName)
+                    .collect { state ->
+                        when (state) {
+                            is DownloadProgressState.Idle -> Unit
+                            is DownloadProgressState.Running -> {
+                                cardDownloadProgress.visibility = View.VISIBLE
+                                tvDownloadingFileName.text = stepLabel
+                                tvDownloadPercent.text = "${state.progressPercent}%"
+                                progressBarDownload.progress = state.progressPercent
+                                val downloadedStr = mediaStorageRepository.formatFileSize(state.bytesDownloaded)
+                                val totalStr = if (state.totalBytes > 0) {
+                                    mediaStorageRepository.formatFileSize(state.totalBytes)
+                                } else {
+                                    "..."
+                                }
+                                tvDownloadBytes.text = "Story ${idx + 1}/${options.size} • $downloadedStr / $totalStr"
+                            }
+                            is DownloadProgressState.Completed -> {
+                                completedCount++
+                                lastCompletedFile = File(state.filePath)
+                                lastOption = state.option
+                            }
+                            is DownloadProgressState.Failed -> Unit
+                        }
+                    }
+            }
+
+            cardDownloadProgress.visibility = View.GONE
+            if (lastCompletedFile != null) {
+                showCompletedCard(lastCompletedFile!!, mediaInfo, lastOption)
+            }
+            Toast.makeText(
+                this@MainActivity,
+                "Đã tải xong $completedCount/${options.size} Story / Video vào thư viện!",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     private fun requestPermissionsAndDownload(mediaInfo: ExtractedMediaInfo, option: MediaOption) {

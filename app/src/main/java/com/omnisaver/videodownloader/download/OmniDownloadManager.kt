@@ -55,14 +55,21 @@ class OmniDownloadManager(private val context: Context) {
         val sanitizedTitle = mediaInfo.title
             .replace(Regex("[^A-Za-z0-9_]+"), "_")
             .trim('_')
-            .take(36)
+            .take(30)
             .trimEnd('_')
             .ifBlank { System.currentTimeMillis().toString() }
 
         val sanitizedQuality = option.qualityLabel
             .replace(Regex("[^A-Za-z0-9_]+"), "_")
             .trim('_')
+            .take(26)
+            .trimEnd('_')
             .ifBlank { option.mediaType.name.lowercase() }
+
+        val baseAssetPath = option.url.substringBefore('?').ifBlank { option.url }
+        val streamHash = ((baseAssetPath.hashCode().toLong() and 0x7FFFFFFFL) % 1_000_000L)
+            .toString()
+            .padStart(6, '0')
 
         val extension = option.extension.trimStart('.').ifBlank {
             when (option.mediaType) {
@@ -72,7 +79,7 @@ class OmniDownloadManager(private val context: Context) {
             }
         }
 
-        return "${mediaInfo.platform.folderName}_${sanitizedTitle}_${sanitizedQuality}.$extension"
+        return "${mediaInfo.platform.folderName}_${sanitizedTitle}_${sanitizedQuality}_${streamHash}.$extension"
     }
 
     fun getTargetFile(mediaInfo: ExtractedMediaInfo, fileName: String): File {
