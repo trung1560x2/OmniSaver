@@ -83,7 +83,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:singleLine="true"
-                        android:text="v2.5.0 • Full HD &amp; OTA Ready"
+                        android:text="v2.6.0 • Full HD &amp; Batch Ready"
                         android:textColor="#CBD5E1"
                         android:textSize="11sp" />
 
@@ -331,10 +331,10 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
                         android:background="@drawable/bg_liquid_glass_input"
-                        android:hint="Dán link Facebook, X, Instagram, TikTok, Threads..."
+                        android:hint="Dán 1 hoặc nhiều link (mỗi dòng 1 link) để tải hàng loạt..."
                         android:importantForAutofill="no"
                         android:inputType="textUri|textMultiLine"
-                        android:maxLines="4"
+                        android:maxLines="5"
                         android:minHeight="58dp"
                         android:paddingHorizontal="16dp"
                         android:paddingVertical="14dp"
@@ -342,7 +342,7 @@
                         android:textColorHint="#94A3B8"
                         android:textSize="14sp" />
 
-                    <!-- Liquid Glass Paste & Clear Capsules -->
+                    <!-- Liquid Glass Paste, Append & Clear Capsules -->
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -355,14 +355,33 @@
                             style="@style/Widget.Material3.Button.OutlinedButton"
                             android:layout_width="0dp"
                             android:layout_height="44dp"
-                            android:layout_marginEnd="8dp"
+                            android:layout_marginEnd="6dp"
                             android:layout_weight="1"
                             android:background="@drawable/bg_liquid_glass_pill"
                             android:insetTop="0dp"
                             android:insetBottom="0dp"
-                            android:text="Dán từ Clipboard"
+                            android:paddingHorizontal="8dp"
+                            android:text="Dán mới"
                             android:textColor="#7DD3FC"
-                            android:textSize="13sp"
+                            android:textSize="12sp"
+                            android:textStyle="bold"
+                            app:backgroundTint="@null"
+                            app:strokeWidth="0dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnAppendPaste"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="44dp"
+                            android:layout_marginEnd="6dp"
+                            android:layout_weight="1.15"
+                            android:background="@drawable/bg_liquid_glass_pill"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:paddingHorizontal="8dp"
+                            android:text="+ Dán thêm"
+                            android:textColor="#6EE7B7"
+                            android:textSize="12sp"
                             android:textStyle="bold"
                             app:backgroundTint="@null"
                             app:strokeWidth="0dp" />
@@ -375,10 +394,10 @@
                             android:background="@drawable/bg_liquid_glass_pill"
                             android:insetTop="0dp"
                             android:insetBottom="0dp"
-                            android:paddingHorizontal="18dp"
+                            android:paddingHorizontal="14dp"
                             android:text="Xóa"
                             android:textColor="#CBD5E1"
-                            android:textSize="13sp"
+                            android:textSize="12sp"
                             app:backgroundTint="@null"
                             app:strokeWidth="0dp" />
                     </LinearLayout>

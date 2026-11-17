@@ -32,6 +32,7 @@ import com.omnisaver.videodownloader.model.DownloadProgressState
 import com.omnisaver.videodownloader.model.DownloadedFileItem
 import com.omnisaver.videodownloader.model.ExtractedMediaInfo
 import com.omnisaver.videodownloader.model.MediaOption
+import com.omnisaver.videodownloader.model.MediaType
 import com.omnisaver.videodownloader.model.SocialPlatform
 import com.omnisaver.videodownloader.model.UrlSource
 import com.omnisaver.videodownloader.ota.OtaReleaseInfo
@@ -48,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var editUrl: EditText
     private lateinit var tvDetectedPlatform: TextView
     private lateinit var btnPaste: MaterialButton
+    private lateinit var btnAppendPaste: MaterialButton
     private lateinit var btnClear: MaterialButton
     private lateinit var btnExtract: MaterialButton
     private lateinit var tvAppVersionSubtitle: TextView
@@ -149,6 +151,7 @@ class MainActivity : AppCompatActivity() {
         editUrl = findViewById(R.id.editUrl)
         tvDetectedPlatform = findViewById(R.id.tvDetectedPlatform)
         btnPaste = findViewById(R.id.btnPaste)
+        btnAppendPaste = findViewById(R.id.btnAppendPaste)
         btnClear = findViewById(R.id.btnClear)
         btnExtract = findViewById(R.id.btnExtract)
         tvAppVersionSubtitle = findViewById(R.id.tvAppVersionSubtitle)
@@ -216,11 +219,60 @@ class MainActivity : AppCompatActivity() {
             if (clipText.isNullOrBlank()) {
                 Toast.makeText(this, "Bộ nhớ tạm đang trống", Toast.LENGTH_SHORT).show()
             } else {
-                val extractedUrl = UrlDetector.extractFirstUrl(clipText) ?: clipText.trim()
-                editUrl.setText(extractedUrl)
-                editUrl.setSelection(editUrl.text.length)
-                triggerExtraction(extractedUrl, UrlSource.MANUAL)
+                val allUrls = UrlDetector.extractAllUrls(clipText)
+                if (allUrls.size >= 2) {
+                    val joined = allUrls.joinToString("\n")
+                    editUrl.setText(joined)
+                    editUrl.setSelection(editUrl.text.length)
+                    Toast.makeText(
+                        this,
+                        "Đã nhận diện ${allUrls.size} link! Bấm nút Tải Hàng Loạt bên dưới.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    val extractedUrl = allUrls.firstOrNull() ?: clipText.trim()
+                    editUrl.setText(extractedUrl)
+                    editUrl.setSelection(editUrl.text.length)
+                    triggerExtraction(extractedUrl, UrlSource.MANUAL)
+                }
             }
+        }
+
+        btnAppendPaste.setOnClickListener {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
+            if (clipText.isNullOrBlank()) {
+                Toast.makeText(this, "Bộ nhớ tạm đang trống", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val incomingUrls = UrlDetector.extractAllUrls(clipText)
+            if (incomingUrls.isEmpty()) {
+                Toast.makeText(this, "Không tìm thấy link hợp lệ trong bộ nhớ tạm!", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val currentText = editUrl.text?.toString()?.trim().orEmpty()
+            val existingUrls = UrlDetector.extractAllUrls(currentText)
+            val existingCleanKeys = existingUrls.map { UrlDetector.cleanUrl(it) }.toSet()
+            val newUrls = incomingUrls.filter { UrlDetector.cleanUrl(it) !in existingCleanKeys }
+
+            if (newUrls.isEmpty()) {
+                Toast.makeText(
+                    this,
+                    "Link này đã có sẵn trong danh sách (${existingUrls.size} link)!",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@setOnClickListener
+            }
+
+            val updatedList = existingUrls + newUrls
+            val joined = updatedList.joinToString("\n")
+            editUrl.setText(joined)
+            editUrl.setSelection(editUrl.text.length)
+            Toast.makeText(
+                this,
+                "Đã cộng dồn! Hiện có ${updatedList.size} link trong danh sách chờ tải.",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         btnClear.setOnClickListener {
@@ -235,7 +287,12 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Vui lòng dán đường dẫn Facebook, X, Instagram, TikTok hoặc Threads!", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            triggerExtraction(input, UrlSource.MANUAL)
+            val allUrls = UrlDetector.extractAllUrls(input)
+            if (allUrls.size >= 2) {
+                startMultiUrlBatchExtractionAndDownload(allUrls)
+            } else {
+                triggerExtraction(input, UrlSource.MANUAL)
+            }
         }
 
         btnOtaUpdate.setOnClickListener {
@@ -326,7 +383,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updatePlatformBadge(rawText: String) {
-        val url = UrlDetector.extractFirstUrl(rawText)
+        val allUrls = UrlDetector.extractAllUrls(rawText)
+        if (allUrls.size >= 2) {
+            tvDetectedPlatform.text = "✦ ${allUrls.size} LINK HÀNG LOẠT"
+            tvDetectedPlatform.background = LiquidGlassHelper.createPlatformGlassPill("#10B981", fillAlpha = 165)
+            btnExtract.text = "TẢI HÀNG LOẠT ${allUrls.size} LINK (FULL HD)"
+            btnExtract.setBackgroundResource(R.drawable.bg_liquid_button_emerald)
+            return
+        }
+
+        btnExtract.text = "BÓC TÁCH & TẢI VIDEO / MP3"
+        btnExtract.setBackgroundResource(R.drawable.bg_liquid_button_primary)
+
+        val url = allUrls.firstOrNull()
         if (url == null) {
             tvDetectedPlatform.text = "Tự động nhận diện"
             tvDetectedPlatform.background = LiquidGlassHelper.createPlatformGlassPill("#334155", fillAlpha = 85)
@@ -336,6 +405,122 @@ class MainActivity : AppCompatActivity() {
         val hasCookie = authCookieStore.isLoggedIn(platform)
         tvDetectedPlatform.text = if (hasCookie) "${platform.displayName} • Có Cookie ✓" else platform.displayName
         tvDetectedPlatform.background = LiquidGlassHelper.createPlatformGlassPill(platform.badgeColorHex, fillAlpha = 140)
+    }
+
+    private fun startMultiUrlBatchExtractionAndDownload(urls: List<String>) {
+        if (urls.isEmpty()) return
+        btnExtract.isEnabled = false
+        cardCompleted.visibility = View.GONE
+        cardExtracting.visibility = View.VISIBLE
+
+        activeProgressJob?.cancel()
+        activeProgressJob = lifecycleScope.launch {
+            var completedFiles = 0
+            var succeededLinks = 0
+            var lastCompletedFile: File? = null
+            var lastMediaInfo: ExtractedMediaInfo? = null
+            var lastOption: MediaOption? = null
+
+            for ((linkIdx, rawUrl) in urls.withIndex()) {
+                val cleanUrl = UrlDetector.cleanUrl(rawUrl)
+                val platform = UrlDetector.detectPlatform(cleanUrl)
+                cardExtracting.visibility = View.VISIBLE
+                tvExtractingStatus.text = "[Link ${linkIdx + 1}/${urls.size}] Đang bóc tách Full HD từ ${platform.displayName}..."
+
+                val extractResult = extractor.extract(cleanUrl)
+                val mediaInfo = extractResult.getOrNull()
+                if (mediaInfo == null || mediaInfo.options.isEmpty()) {
+                    continue
+                }
+
+                cardExtracting.visibility = View.GONE
+                val slideBatch = mediaInfo.batchDownloadOptions()
+                val targetOptions = if (
+                    mediaInfo.platform == SocialPlatform.TIKTOK &&
+                    slideBatch.isNotEmpty() &&
+                    slideBatch.all { it.mediaType == MediaType.IMAGE }
+                ) {
+                    slideBatch
+                } else {
+                    listOfNotNull(
+                        mediaInfo.options.firstOrNull { it.isHighestQuality }
+                            ?: mediaInfo.options.firstOrNull()
+                    )
+                }
+
+                var linkDownloadedAtLeastOne = false
+                for (option in targetOptions) {
+                    val fileName = omniDownloadManager.buildFileName(mediaInfo, option)
+                    val targetFile = omniDownloadManager.getTargetFile(mediaInfo, fileName)
+                    if (targetFile.exists() && targetFile.length() > 0L) {
+                        completedFiles++
+                        linkDownloadedAtLeastOne = true
+                        lastCompletedFile = targetFile
+                        lastMediaInfo = mediaInfo
+                        lastOption = option
+                        continue
+                    }
+
+                    val downloadId = try {
+                        omniDownloadManager.enqueueDownload(mediaInfo, option, fileName)
+                    } catch (_: Exception) {
+                        continue
+                    }
+
+                    val stepLabel = "[Link ${linkIdx + 1}/${urls.size}] $fileName"
+                    cardDownloadProgress.visibility = View.VISIBLE
+                    tvDownloadingFileName.text = stepLabel
+                    tvDownloadPercent.text = "0%"
+                    progressBarDownload.progress = 0
+                    tvDownloadBytes.text = "Đang tải từ ${mediaInfo.platform.displayName}..."
+
+                    omniDownloadManager.observeDownloadProgress(downloadId, mediaInfo, option, fileName)
+                        .collect { state ->
+                            when (state) {
+                                is DownloadProgressState.Idle -> Unit
+                                is DownloadProgressState.Running -> {
+                                    cardDownloadProgress.visibility = View.VISIBLE
+                                    tvDownloadingFileName.text = stepLabel
+                                    tvDownloadPercent.text = "${state.progressPercent}%"
+                                    progressBarDownload.progress = state.progressPercent
+                                    val downloadedStr = mediaStorageRepository.formatFileSize(state.bytesDownloaded)
+                                    val totalStr = if (state.totalBytes > 0) {
+                                        mediaStorageRepository.formatFileSize(state.totalBytes)
+                                    } else {
+                                        "..."
+                                    }
+                                    tvDownloadBytes.text = "Link ${linkIdx + 1}/${urls.size} • $downloadedStr / $totalStr"
+                                }
+                                is DownloadProgressState.Completed -> {
+                                    completedFiles++
+                                    linkDownloadedAtLeastOne = true
+                                    lastCompletedFile = File(state.filePath)
+                                    lastMediaInfo = state.mediaInfo
+                                    lastOption = state.option
+                                }
+                                is DownloadProgressState.Failed -> Unit
+                            }
+                        }
+                }
+                if (linkDownloadedAtLeastOne) {
+                    succeededLinks++
+                }
+            }
+
+            cardExtracting.visibility = View.GONE
+            cardDownloadProgress.visibility = View.GONE
+            btnExtract.isEnabled = true
+
+            if (lastCompletedFile != null && lastMediaInfo != null && lastOption != null) {
+                showCompletedCard(lastCompletedFile!!, lastMediaInfo!!, lastOption!!)
+            }
+
+            Toast.makeText(
+                this@MainActivity,
+                "Hoàn tất hàng loạt: Đã tải $completedFiles tệp ($succeededLinks/${urls.size} link)!",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     private fun handleIncomingShareIntent(incomingIntent: Intent?) {

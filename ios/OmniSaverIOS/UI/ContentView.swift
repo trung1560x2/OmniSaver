@@ -25,6 +25,7 @@ struct ContentView: View {
 
     @State private var extractedInfo: ExtractedMediaInfo? = nil
     @State private var selectedOption: MediaOption? = nil
+    @State private var checkedOptionIds: Set<String> = []
 
     @State private var showPrivateBrowser: Bool = false
     @State private var showSettingsSheet: Bool = false
@@ -245,40 +246,51 @@ struct ContentView: View {
     // MARK: - 3. URL Input & Actions Glass Card
 
     private var urlInputCard: some View {
-        LiquidGlassCard {
+        let detectedUrls = UrlDetector.extractAllUrls(urlInput)
+        let isMultiLinkMode = detectedUrls.count >= 2
+
+        return LiquidGlassCard {
             VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Image(systemName: "link.badge.plus")
-                        .foregroundColor(.cyan)
-                    Text("Nhập link Video / Reel / Story / Bài viết")
+                HStack(spacing: 8) {
+                    Image(systemName: isMultiLinkMode ? "square.stack.3d.down.right.fill" : "link.badge.plus")
+                        .foregroundColor(isMultiLinkMode ? .green : .cyan)
+                    Text(isMultiLinkMode ? "Danh sách tải hàng loạt nhiều link" : "Nhập link Video / Reel / Story / Bài viết")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Spacer()
 
-                    let detected = UrlDetector.detectPlatform(urlInput)
-                    if detected != .unknown {
+                    if isMultiLinkMode {
                         LiquidGlassBadge(
-                            text: detected.shortName.uppercased(),
-                            systemImage: detected.sfSymbolName,
-                            color: detected.accentColor
+                            text: "\(detectedUrls.count) LINK HÀNG LOẠT",
+                            systemImage: "square.stack.3d.down.right.fill",
+                            color: .green
                         )
+                    } else {
+                        let detected = UrlDetector.detectPlatform(urlInput)
+                        if detected != .unknown {
+                            LiquidGlassBadge(
+                                text: detected.shortName.uppercased(),
+                                systemImage: detected.sfSymbolName,
+                                color: detected.accentColor
+                            )
+                        }
                     }
                 }
 
-                // URL Input Field + Paste / Clear
-                HStack(spacing: 8) {
+                // Multi-line URL Input Field (Double-Bezel inner recessed well)
+                HStack(alignment: .top, spacing: 8) {
                     TextField(
-                        "Dán link Facebook, TikTok, Instagram, X, Threads...",
-                        text: $urlInput
+                        "Dán 1 hoặc nhiều link (mỗi dòng 1 link)...",
+                        text: $urlInput,
+                        axis: .vertical
                     )
+                    .lineLimit(1...5)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(.white)
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
-                    .submitLabel(.go)
-                    .onSubmit {
-                        startExtraction()
-                    }
                     .onChange(of: urlInput) { newVal in
                         let det = UrlDetector.detectPlatform(newVal)
                         if det != .unknown {
@@ -295,6 +307,7 @@ struct ContentView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 16))
                                 .foregroundColor(.white.opacity(0.5))
+                                .padding(.top, 2)
                         }
                     }
                 }
@@ -305,27 +318,74 @@ struct ContentView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+                        .strokeBorder(
+                            isMultiLinkMode ? Color.green.opacity(0.45) : Color.white.opacity(0.20),
+                            lineWidth: 1
+                        )
                 )
 
-                // Quick Paste & Clear Buttons
-                HStack(spacing: 10) {
+                // Quick Action Pills Row
+                HStack(spacing: 8) {
                     LiquidGlassPillButton(
-                        title: "Dán từ Bộ nhớ tạm",
+                        title: "Dán mới",
                         systemImage: "doc.on.clipboard.fill",
                         tintColor: .cyan
                     ) {
                         if let pasted = UIPasteboard.general.string,
                            !pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            urlInput = pasted
-                            let detected = UrlDetector.detectPlatform(pasted)
-                            if detected != .unknown {
-                                selectedPlatform = detected
+                            let pastedUrls = UrlDetector.extractAllUrls(pasted)
+                            if pastedUrls.count >= 2 {
+                                urlInput = pastedUrls.joined(separator: "\n")
+                                extractionError = nil
+                                statusBanner = "Đã nhận diện \(pastedUrls.count) link! Bấm nút Tải Hàng Loạt bên dưới để tải tất cả."
+                            } else {
+                                urlInput = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let detected = UrlDetector.detectPlatform(pasted)
+                                if detected != .unknown {
+                                    selectedPlatform = detected
+                                }
+                                startExtraction()
                             }
-                            startExtraction()
                         } else {
                             extractionError = "Bộ nhớ tạm hiện đang trống. Hãy sao chép link video trước!"
                         }
+                    }
+
+                    LiquidGlassPillButton(
+                        title: "+ Dán thêm",
+                        systemImage: "plus.rectangle.on.clipboard",
+                        tintColor: .green
+                    ) {
+                        guard let pasted = UIPasteboard.general.string,
+                              !pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                            extractionError = "Bộ nhớ tạm hiện đang trống. Hãy sao chép thêm link trước!"
+                            return
+                        }
+
+                        let existingCleaned = Set(detectedUrls.map { UrlDetector.cleanUrl($0) })
+                        let clipboardUrls = UrlDetector.extractAllUrls(pasted)
+                        let candidates = clipboardUrls.isEmpty
+                            ? [pasted.trimmingCharacters(in: .whitespacesAndNewlines)]
+                            : clipboardUrls
+
+                        let freshUrls = candidates.filter { candidate in
+                            candidate.lowercased().hasPrefix("http") &&
+                                !existingCleaned.contains(UrlDetector.cleanUrl(candidate))
+                        }
+
+                        guard !freshUrls.isEmpty else {
+                            extractionError = nil
+                            statusBanner = "Link trong bộ nhớ tạm đã có sẵn trong danh sách chờ tải (\(detectedUrls.count) link)."
+                            return
+                        }
+
+                        let existingText = urlInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let appendedBlock = freshUrls.joined(separator: "\n")
+                        urlInput = existingText.isEmpty ? appendedBlock : "\(existingText)\n\(appendedBlock)"
+
+                        let newTotal = UrlDetector.extractAllUrls(urlInput).count
+                        extractionError = nil
+                        statusBanner = "Đã cộng dồn! Hiện có \(newTotal) link trong danh sách chờ tải."
                     }
 
                     LiquidGlassPillButton(
@@ -336,21 +396,40 @@ struct ContentView: View {
                         urlInput = ""
                         extractedInfo = nil
                         selectedOption = nil
+                        checkedOptionIds.removeAll()
                         extractionError = nil
                         statusBanner = nil
                     }
 
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
 
-                // Primary Extract Button
-                LiquidGlassPrimaryButton(
-                    title: isExtracting ? "Đang phân tích luồng Full HD..." : "Phân tích & Tải Full HD",
-                    systemImage: "sparkles.tv.fill",
-                    isDisabled: urlInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                    isLoading: isExtracting
-                ) {
-                    startExtraction()
+                // Primary Extract or Multi-URL Batch Download Button
+                if isMultiLinkMode {
+                    LiquidGlassPrimaryButton(
+                        title: downloadManager.isDownloading
+                            ? "Đang tải hàng loạt \(detectedUrls.count) link..."
+                            : "Tải Hàng Loạt \(detectedUrls.count) Link (Full HD)",
+                        systemImage: "square.stack.3d.down.right.fill",
+                        isDisabled: downloadManager.isDownloading || isExtracting,
+                        isLoading: downloadManager.isDownloading,
+                        gradientColors: [
+                            Color(red: 0.10, green: 0.78, blue: 0.56),
+                            Color(red: 0.14, green: 0.65, blue: 0.92),
+                            Color(red: 0.38, green: 0.46, blue: 0.96)
+                        ]
+                    ) {
+                        triggerMultiUrlBatchDownload(urls: detectedUrls)
+                    }
+                } else {
+                    LiquidGlassPrimaryButton(
+                        title: isExtracting ? "Đang phân tích luồng Full HD..." : "Phân tích & Tải Full HD",
+                        systemImage: "sparkles.tv.fill",
+                        isDisabled: urlInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || downloadManager.isDownloading,
+                        isLoading: isExtracting
+                    ) {
+                        startExtraction()
+                    }
                 }
 
                 // Private Browser & Sniffer Launch Button
@@ -553,32 +632,79 @@ struct ContentView: View {
                     )
                 }
 
-                // Quality Selector List
-                Text("Chọn chất lượng tải về:")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.90))
+                // Multi-Select Checkboxes & Quality Selector Header
+                let selectableTargets = batchOptions.count >= 2
+                    ? batchOptions
+                    : info.options.filter { $0.mediaType != .audio }
+                let allTargetsSelected = !selectableTargets.isEmpty &&
+                    selectableTargets.allSatisfy { checkedOptionIds.contains($0.id) }
+
+                HStack(spacing: 8) {
+                    Text("Tích chọn mục muốn tải (\(checkedOptionIds.count))")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.92))
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    if selectableTargets.count >= 2 {
+                        LiquidGlassPillButton(
+                            title: allTargetsSelected
+                                ? "Chỉ chọn tốt nhất"
+                                : "Chọn tất cả (\(selectableTargets.count))",
+                            systemImage: allTargetsSelected ? "sparkles" : "checkmark.rectangle.stack.fill",
+                            isSelected: allTargetsSelected,
+                            tintColor: allTargetsSelected ? .cyan : .green
+                        ) {
+                            withAnimation(.spring(response: 0.30, dampingFraction: 0.78)) {
+                                if allTargetsSelected {
+                                    if let best = info.bestOption {
+                                        checkedOptionIds = [best.id]
+                                        selectedOption = best
+                                    } else {
+                                        checkedOptionIds.removeAll()
+                                    }
+                                } else {
+                                    for target in selectableTargets {
+                                        checkedOptionIds.insert(target.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 VStack(spacing: 8) {
                     ForEach(info.options) { option in
-                        let isSelected = selectedOption?.id == option.id
+                        let isChecked = checkedOptionIds.contains(option.id)
+                        let isPreviewFocused = selectedOption?.id == option.id
                         Button(action: {
-                            selectedOption = option
+                            withAnimation(.spring(response: 0.26, dampingFraction: 0.80)) {
+                                if checkedOptionIds.contains(option.id) {
+                                    if checkedOptionIds.count > 1 {
+                                        checkedOptionIds.remove(option.id)
+                                    }
+                                } else {
+                                    checkedOptionIds.insert(option.id)
+                                }
+                                selectedOption = option
+                            }
                         }) {
                             HStack(spacing: 10) {
                                 Image(
-                                    systemName: isSelected
-                                        ? "checkmark.circle.fill"
-                                        : "circle"
+                                    systemName: isChecked
+                                        ? "checkmark.square.fill"
+                                        : "square"
                                 )
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(isSelected ? .cyan : .white.opacity(0.45))
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundColor(isChecked ? .cyan : .white.opacity(0.45))
 
                                 Image(
                                     systemName: option.mediaType == .audio
                                         ? "waveform.circle.fill"
                                         : (option.mediaType == .image ? "photo.fill" : "video.fill")
                                 )
-                                .foregroundColor(.cyan)
+                                .foregroundColor(isChecked ? .cyan : .white.opacity(0.75))
                                 .font(.system(size: 14))
 
                                 Text(option.qualityLabel)
@@ -609,18 +735,18 @@ struct ContentView: View {
                             .background(
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                                     .fill(
-                                        isSelected
+                                        isChecked
                                             ? Color.cyan.opacity(0.22)
-                                            : Color.white.opacity(0.06)
+                                            : (isPreviewFocused ? Color.white.opacity(0.10) : Color.white.opacity(0.06))
                                     )
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                                     .strokeBorder(
-                                        isSelected
+                                        isChecked
                                             ? Color.cyan.opacity(0.85)
                                             : Color.white.opacity(0.14),
-                                        lineWidth: isSelected ? 1.3 : 1.0
+                                        lineWidth: isChecked ? 1.3 : 1.0
                                     )
                             )
                         }
@@ -629,8 +755,21 @@ struct ContentView: View {
                 }
 
                 // Download & Share Action Buttons
-                let chosen = selectedOption ?? info.bestOption
-                if let activeOption = chosen {
+                let checkedOptions = info.options.filter { checkedOptionIds.contains($0.id) }
+                let chosen = checkedOptions.first ?? selectedOption ?? info.bestOption
+
+                if checkedOptions.count > 1 {
+                    LiquidGlassPrimaryButton(
+                        title: downloadManager.isDownloading
+                            ? "Đang tải \(checkedOptions.count) mục đã chọn..."
+                            : "Tải \(checkedOptions.count) Mục Đã Chọn về Ảnh",
+                        systemImage: "checkmark.rectangle.stack.fill",
+                        isDisabled: downloadManager.isDownloading,
+                        isLoading: downloadManager.isDownloading
+                    ) {
+                        triggerBatchDownload(info: info, options: checkedOptions)
+                    }
+                } else if let activeOption = chosen {
                     HStack(spacing: 10) {
                         LiquidGlassPrimaryButton(
                             title: downloadManager.isDownloading
@@ -658,11 +797,11 @@ struct ContentView: View {
                     }
                 }
 
-                if batchOptions.count > 1 {
+                if batchOptions.count > 1 && checkedOptions.count <= 1 {
                     LiquidGlassPrimaryButton(
                         title: downloadManager.isDownloading
                             ? "Đang tải trọn bộ \(batchOptions.count) mục..."
-                            : "Tải tất cả \(batchOptions.count) Story / Video về Ảnh (Full HD)",
+                            : "Tải trọn bộ \(batchOptions.count) Story / Video về Ảnh (Full HD)",
                         systemImage: "square.stack.3d.down.right.fill",
                         isDisabled: downloadManager.isDownloading,
                         isLoading: downloadManager.isDownloading,
@@ -826,6 +965,7 @@ struct ContentView: View {
     private func applyExtractedInfo(_ info: ExtractedMediaInfo) {
         self.extractedInfo = info
         self.selectedOption = info.bestOption
+        self.checkedOptionIds = Set(info.bestOption.map { [$0.id] } ?? [])
         self.selectedPlatform = info.platform != .unknown ? info.platform : self.selectedPlatform
         self.extractionError = nil
     }
@@ -858,11 +998,33 @@ struct ContentView: View {
             do {
                 let items = try await downloadManager.startDownloadBatch(mediaInfo: info, options: options)
                 await MainActor.run {
-                    self.statusBanner = "Đã tải trọn bộ \(items.count)/\(options.count) Story / Video & lưu vào Thư viện Ảnh!"
+                    self.statusBanner = "Đã tải trọn bộ \(items.count)/\(options.count) mục đã chọn & lưu vào Thư viện Ảnh!"
                 }
             } catch {
                 await MainActor.run {
                     self.extractionError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func triggerMultiUrlBatchDownload(urls: [String]) {
+        guard !urls.isEmpty, !downloadManager.isDownloading else { return }
+        extractionError = nil
+        statusBanner = nil
+
+        Task {
+            let result = await downloadManager.startMultiUrlBatchDownload(urls: urls)
+            await MainActor.run {
+                let savedCount = result.succeeded.filter { $0.savedToPhotos }.count
+                if result.succeeded.isEmpty {
+                    self.extractionError = "Không thể tải được \(result.failedCount)/\(urls.count) link. Hãy kiểm tra lại đường dẫn hoặc đăng nhập trong Trình duyệt Riêng tư."
+                } else if result.failedCount == 0 {
+                    self.statusBanner = savedCount > 0
+                        ? "Đã tải hàng loạt thành công \(result.succeeded.count) video/ảnh từ \(urls.count) link & lưu vào Thư viện Ảnh!"
+                        : "Đã tải hàng loạt thành công \(result.succeeded.count) mục từ \(urls.count) link!"
+                } else {
+                    self.statusBanner = "Đã tải thành công \(result.succeeded.count) video/ảnh vào Ảnh (\(result.failedCount)/\(urls.count) link không thể trích xuất)."
                 }
             }
         }

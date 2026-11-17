@@ -1,11 +1,11 @@
 {
-    "versionCode":  8,
-    "versionName":  "2.5.0-FullHD",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.5.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.apk",
-    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.5.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.5_FullHD.ipa",
-    "changelog":  "• Sửa triệt để lỗi dán link Story/Video mới của cùng một người nhưng vẫn tải lại video cũ hoặc giữ tên cũ (cô lập ranh giới từng thẻ Story UzpfSVNDOj... và giải mã redirect /share/ chính xác 100%)\n• Tự động bóc tách trọn bộ tất cả các Story (cả Video Full HD 1080p kèm âm thanh gốc lẫn Ảnh Story HD) đang có của người đó\n• Bổ sung nút \u0027Tải tất cả X Story / Video (Full HD)\u0027 trên cả iOS và Android giúp tải toàn bộ Story của một người chỉ với 1 chạm\n• Mỗi Story và Video có mã định danh #ID và tên tệp riêng biệt, không bao giờ bị trùng lặp",
-    "publishedAt":  "2026-10-30",
-    "fileSizeBytes":  5377134,
-    "sha256":  "6d46443bce6c7b8fb25746c69309aa7bd19d6f439798923ab476e2423879c05f",
+    "versionCode":  9,
+    "versionName":  "2.6.0-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6_FullHD.apk",
+    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6_FullHD.ipa",
+    "changelog":  "• Nâng cấp Ô nhập Đa dòng thông minh + nút \u0027+ Dán thêm\u0027: Cho phép dán hoặc cộng dồn nhiều link liên tiếp (tự động lọc trùng link) và bấm 1 nút \u0027Tải Hàng Loạt X Link (Full HD)\u0027 ngay trên màn hình chính\n• Bổ sung Checkbox tích chọn đa mục + nút \u0027Chọn tất cả\u0027: Cho phép tích chọn tuỳ ý nhiều Story / Slide / Ảnh / Video và tải cùng lúc trong 1 lần chạm\n• Đồng bộ 100% tính năng tải hàng loạt trên cả iOS (.ipa) và Android (.apk)",
+    "publishedAt":  "2026-11-18",
+    "fileSizeBytes":  5384590,
+    "sha256":  "b0ba8f552fb1060a82a6d509ef30eeb956c05915ee01c70b45ed9757697b4791",
     "forceUpdate":  false
 }

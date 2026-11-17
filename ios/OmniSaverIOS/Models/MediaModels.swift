@@ -190,6 +190,35 @@ enum UrlDetector {
         return trimmed.hasPrefix("http") ? trimmed : nil
     }
 
+    static func extractAllUrls(_ input: String) -> [String] {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let pattern = #"https?://[^\s"'<>]+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return trimmed.hasPrefix("http") ? [trimmed] : []
+        }
+
+        let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        let matches = regex.matches(in: trimmed, options: [], range: range)
+
+        var seenCleaned = Set<String>()
+        var results: [String] = []
+
+        for match in matches {
+            guard let swiftRange = Range(match.range, in: trimmed) else { continue }
+            var candidate = String(trimmed[swiftRange])
+            while let last = candidate.last, ".,;!)']\"".contains(last) {
+                candidate.removeLast()
+            }
+            guard !candidate.isEmpty else { continue }
+            let normalized = cleanUrl(candidate)
+            if seenCleaned.insert(normalized).inserted {
+                results.append(candidate)
+            }
+        }
+        return results
+    }
+
     static func cleanUrl(_ rawUrl: String) -> String {
         let extracted = extractFirstUrl(rawUrl) ?? rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var components = URLComponents(string: extracted) else {

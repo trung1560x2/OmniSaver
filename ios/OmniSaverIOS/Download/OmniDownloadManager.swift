@@ -166,6 +166,95 @@ final class OmniDownloadManager: ObservableObject {
         return downloadedBatch
     }
 
+    func startMultiUrlBatchDownload(urls: [String]) async -> (succeeded: [DownloadedItem], failedCount: Int) {
+        guard !urls.isEmpty else {
+            return ([], 0)
+        }
+
+        ensureDownloadsDirectoryExists()
+        isDownloading = true
+        progress = 0.01
+        statusMessage = "Đang chuẩn bị tải hàng loạt \(urls.count) link..."
+
+        defer {
+            isDownloading = false
+        }
+
+        var succeeded: [DownloadedItem] = []
+        var failedCount = 0
+        let totalUrls = urls.count
+        let urlSpan = 1.0 / Double(totalUrls)
+
+        for (idx, rawUrl) in urls.enumerated() {
+            let linkPrefix = "[Link \(idx + 1)/\(totalUrls)] "
+            let urlStartFrac = Double(idx) * urlSpan
+            statusMessage = "\(linkPrefix)Đang phân tích luồng Full HD..."
+            progress = max(0.01, urlStartFrac)
+
+            do {
+                let info = try await MultiPlatformExtractor.shared.extract(rawInput: rawUrl)
+
+                let optionsToDownload: [MediaOption]
+                let batchCandidates = info.batchDownloadOptions
+                if info.platform == .tiktok,
+                   !batchCandidates.isEmpty,
+                   batchCandidates.allSatisfy({ $0.mediaType == .image }) {
+                    optionsToDownload = batchCandidates
+                } else if let bestOpt = info.bestOption {
+                    optionsToDownload = [bestOpt]
+                } else {
+                    failedCount += 1
+                    continue
+                }
+
+                let optCount = optionsToDownload.count
+                let subSpan = urlSpan / Double(optCount)
+                var linkDownloadedAny = false
+
+                for (subIdx, opt) in optionsToDownload.enumerated() {
+                    let subStartFrac = urlStartFrac + Double(subIdx) * subSpan
+                    let stepPrefix = optCount > 1
+                        ? "\(linkPrefix)Ảnh \(subIdx + 1)/\(optCount) • "
+                        : linkPrefix
+
+                    do {
+                        let item = try await performSingleDownload(
+                            mediaInfo: info,
+                            option: opt,
+                            statusPrefix: stepPrefix,
+                            progressStart: subStartFrac,
+                            progressSpan: subSpan
+                        )
+                        succeeded.append(item)
+                        linkDownloadedAny = true
+                    } catch {
+                        if optCount == 1 {
+                            failedCount += 1
+                        }
+                    }
+                }
+
+                if optCount > 1 && !linkDownloadedAny {
+                    failedCount += 1
+                }
+            } catch {
+                failedCount += 1
+            }
+        }
+
+        progress = 1.0
+        let savedCount = succeeded.filter { $0.savedToPhotos }.count
+        if failedCount == 0 {
+            statusMessage = savedCount > 0
+                ? "Đã tải xong \(succeeded.count) mục từ \(totalUrls) link & lưu vào Ảnh!"
+                : "Đã tải xong \(succeeded.count) mục từ \(totalUrls) link vào OmniSaver!"
+        } else {
+            statusMessage = "Hoàn tất: Tải thành công \(succeeded.count) mục (\(failedCount)/\(totalUrls) link lỗi)."
+        }
+
+        return (succeeded, failedCount)
+    }
+
     private func performSingleDownload(
         mediaInfo: ExtractedMediaInfo,
         option: MediaOption,

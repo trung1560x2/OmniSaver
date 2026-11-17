@@ -107,10 +107,14 @@ class QualityBottomSheetDialog(
 
     private fun setupOptionsList(root: View) {
         val btnDownloadAllBatch = root.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnDownloadAllBatch)
+        val tvMultiSelectHint = root.findViewById<TextView>(R.id.tvMultiSelectHint)
+        val btnToggleSelectAll = root.findViewById<TextView>(R.id.btnToggleSelectAll)
+        val btnDownloadSelected = root.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnDownloadSelected)
+
         val batchOptions = mediaInfo.batchDownloadOptions()
         if (batchOptions.size >= 2 && btnDownloadAllBatch != null) {
             btnDownloadAllBatch.visibility = View.VISIBLE
-            btnDownloadAllBatch.text = "TẢI TẤT CẢ ${batchOptions.size} STORY / VIDEO (FULL HD)"
+            btnDownloadAllBatch.text = "TẢI TRỌN BỘ ${batchOptions.size} STORY / VIDEO (FULL HD)"
             btnDownloadAllBatch.setOnClickListener {
                 if (onBatchSelected != null) {
                     onBatchSelected.invoke(batchOptions)
@@ -123,15 +127,88 @@ class QualityBottomSheetDialog(
             btnDownloadAllBatch.visibility = View.GONE
         }
 
+        val selectedIndices = LinkedHashSet<Int>()
+        val initialIdx = mediaInfo.options.indexOfFirst { it.isHighestQuality }.takeIf { it >= 0 } ?: 0
+        if (mediaInfo.options.isNotEmpty()) {
+            selectedIndices.add(initialIdx)
+        }
+
+        val selectAllTargetIndices: List<Int> = if (batchOptions.size >= 2) {
+            val batchSet = batchOptions.toSet()
+            mediaInfo.options.indices.filter { mediaInfo.options[it] in batchSet }
+        } else {
+            mediaInfo.options.indices.filter { mediaInfo.options[it].mediaType != MediaType.AUDIO }
+                .ifEmpty { mediaInfo.options.indices.toList() }
+        }
+
         val rvOptions = root.findViewById<RecyclerView>(R.id.rvQualityOptions)
         rvOptions.layoutManager = LinearLayoutManager(context)
-        rvOptions.adapter = QualityOptionAdapter(
+
+        fun refreshMultiSelectFooter() {
+            val count = selectedIndices.size
+            tvMultiSelectHint?.text = "TÍCH CHỌN ĐA MỤC (ĐÃ CHỌN $count)"
+            val allSelected = selectAllTargetIndices.isNotEmpty() && selectAllTargetIndices.all { it in selectedIndices }
+            btnToggleSelectAll?.text = if (allSelected) {
+                "Chỉ chọn tốt nhất"
+            } else {
+                "Chọn tất cả (${selectAllTargetIndices.size})"
+            }
+            if (btnDownloadSelected != null) {
+                btnDownloadSelected.isEnabled = count > 0
+                btnDownloadSelected.alpha = if (count > 0) 1.0f else 0.5f
+                btnDownloadSelected.text = when {
+                    count == 0 -> "HÃY TÍCH CHỌN ÍT NHẤT 1 MỤC"
+                    count == 1 -> "TẢI NGAY MỤC ĐÃ CHỌN"
+                    else -> "TẢI CÙNG LÚC $count MỤC ĐÃ CHỌN"
+                }
+            }
+        }
+
+        val adapter = QualityOptionAdapter(
             options = mediaInfo.options,
-            platform = mediaInfo.platform
-        ) { selectedOption ->
-            onOptionSelected(selectedOption)
+            platform = mediaInfo.platform,
+            selectedIndices = selectedIndices,
+            onToggleIndex = { pos ->
+                if (selectedIndices.contains(pos)) {
+                    selectedIndices.remove(pos)
+                } else {
+                    selectedIndices.add(pos)
+                }
+                refreshMultiSelectFooter()
+            },
+            onInstantSingleDownload = { singleOpt ->
+                onOptionSelected(singleOpt)
+                dismiss()
+            }
+        )
+        rvOptions.adapter = adapter
+
+        btnToggleSelectAll?.setOnClickListener {
+            val allSelected = selectAllTargetIndices.isNotEmpty() && selectAllTargetIndices.all { it in selectedIndices }
+            selectedIndices.clear()
+            if (allSelected) {
+                if (mediaInfo.options.isNotEmpty()) selectedIndices.add(initialIdx)
+            } else {
+                selectedIndices.addAll(selectAllTargetIndices)
+            }
+            adapter.notifyDataSetChanged()
+            refreshMultiSelectFooter()
+        }
+
+        btnDownloadSelected?.setOnClickListener {
+            val chosen = selectedIndices.sorted().mapNotNull { mediaInfo.options.getOrNull(it) }
+            if (chosen.isEmpty()) return@setOnClickListener
+            if (chosen.size == 1) {
+                onOptionSelected(chosen.first())
+            } else if (onBatchSelected != null) {
+                onBatchSelected.invoke(chosen)
+            } else {
+                chosen.forEach { opt -> onOptionSelected(opt) }
+            }
             dismiss()
         }
+
+        refreshMultiSelectFooter()
     }
 
     private fun loadRemoteThumbnail(url: String, targetImageView: ImageView) {
@@ -195,11 +272,14 @@ class QualityBottomSheetDialog(
     private inner class QualityOptionAdapter(
         private val options: List<MediaOption>,
         private val platform: SocialPlatform,
-        private val onClick: (MediaOption) -> Unit
+        private val selectedIndices: Set<Int>,
+        private val onToggleIndex: (Int) -> Unit,
+        private val onInstantSingleDownload: (MediaOption) -> Unit
     ) : RecyclerView.Adapter<QualityOptionAdapter.OptionViewHolder>() {
 
         inner class OptionViewHolder(view: View) : RecyclerView.ViewHolder(view) {
             val cardQualityOption: MaterialCardView = view.findViewById(R.id.cardQualityOption)
+            val cbSelectOption: android.widget.CheckBox = view.findViewById(R.id.cbSelectOption)
             val cardTypeIcon: MaterialCardView = view.findViewById(R.id.cardTypeIcon)
             val ivTypeIcon: ImageView = view.findViewById(R.id.ivTypeIcon)
             val tvQualityLabel: TextView = view.findViewById(R.id.tvQualityLabel)
@@ -207,6 +287,7 @@ class QualityBottomSheetDialog(
             val tvExtensionAndSize: TextView = view.findViewById(R.id.tvExtensionAndSize)
             val tvBestQualityBadge: TextView = view.findViewById(R.id.tvBestQualityBadge)
             val tvNoWatermarkBadge: TextView = view.findViewById(R.id.tvNoWatermarkBadge)
+            val ivDownloadAction: ImageView = view.findViewById(R.id.ivDownloadAction)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): OptionViewHolder {
@@ -217,6 +298,8 @@ class QualityBottomSheetDialog(
 
         override fun onBindViewHolder(holder: OptionViewHolder, position: Int) {
             val option = options[position]
+            val isChecked = position in selectedIndices
+            holder.cbSelectOption.isChecked = isChecked
 
             holder.tvQualityLabel.text = option.qualityLabel
 
@@ -255,7 +338,7 @@ class QualityBottomSheetDialog(
                 }
             }
 
-            val cardGlassRes = if (option.isHighestQuality) {
+            val cardGlassRes = if (isChecked || option.isHighestQuality) {
                 R.drawable.bg_liquid_glass_card_accent
             } else {
                 R.drawable.bg_liquid_glass_card
@@ -280,7 +363,12 @@ class QualityBottomSheetDialog(
             }
 
             holder.cardQualityOption.setOnClickListener {
-                onClick(option)
+                onToggleIndex(position)
+                notifyItemChanged(position)
+            }
+
+            holder.ivDownloadAction.setOnClickListener {
+                onInstantSingleDownload(option)
             }
         }
 

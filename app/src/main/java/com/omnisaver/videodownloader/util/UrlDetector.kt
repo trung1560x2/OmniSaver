@@ -47,6 +47,27 @@ object UrlDetector {
     }
 
     /**
+     * Extracts all distinct HTTP/HTTPS URLs from multi-line or space-separated batch input,
+     * deduplicating by [cleanUrl] while preserving insertion order.
+     */
+    fun extractAllUrls(rawText: String?): List<String> {
+        if (rawText.isNullOrBlank()) return emptyList()
+        val seenClean = LinkedHashSet<String>()
+        val results = ArrayList<String>()
+        for (match in URL_REGEX.findAll(rawText)) {
+            val candidate = match.groupValues[1]
+                .trimEnd('.', ',', ')', ']', ';', '!', '\'', '"')
+            if (candidate.isNotBlank()) {
+                val cleanedKey = cleanUrl(candidate)
+                if (cleanedKey.isNotBlank() && seenClean.add(cleanedKey)) {
+                    results.add(candidate)
+                }
+            }
+        }
+        return results
+    }
+
+    /**
      * Case-insensitive domain/host detection for the 5 supported social platforms.
      */
     fun detectPlatform(url: String): SocialPlatform {
