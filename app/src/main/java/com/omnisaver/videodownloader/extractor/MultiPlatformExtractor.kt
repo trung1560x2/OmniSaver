@@ -106,7 +106,7 @@ class MultiPlatformExtractor(private val context: Context) {
             )
 
         if (directInfo != null && hasPrimaryMedia) {
-            return@withContext Result.success(directInfo)
+            return@withContext Result.success(deduplicateMediaInfo(directInfo))
         }
 
         val rapidAttempt = runCatching {
@@ -114,11 +114,11 @@ class MultiPlatformExtractor(private val context: Context) {
         }
         val rapidInfo = rapidAttempt.getOrNull()
         if (rapidInfo != null && rapidInfo.options.isNotEmpty()) {
-            return@withContext Result.success(rapidInfo)
+            return@withContext Result.success(deduplicateMediaInfo(rapidInfo))
         }
 
         if (directInfo != null && directInfo.options.isNotEmpty()) {
-            return@withContext Result.success(directInfo)
+            return@withContext Result.success(deduplicateMediaInfo(directInfo))
         }
 
         val errorMsg = rapidAttempt.exceptionOrNull()?.localizedMessage
@@ -126,6 +126,69 @@ class MultiPlatformExtractor(private val context: Context) {
             ?: "Không thể bóc tách video/ảnh từ liên kết này. Nếu đây là video Riêng tư / Nhóm kín / 18+, hãy đăng nhập tài khoản trong mục Trình duyệt & Cookie."
 
         Result.failure(IllegalStateException(errorMsg))
+    }
+
+    /**
+     * Collapses duplicate codec/bitrate representations of the SAME video resolution tier
+     * (e.g. 13 identical `HD 720p (MP4)` DASH/progressive variants on Instagram Stories)
+     * into a single best option per `(storyOrItemGroup, mediaType, resolutionTier)` while
+     * preserving every distinct Story #1/#2/#3 or Slide #1/#2/#3.
+     */
+    private fun deduplicateMediaInfo(info: ExtractedMediaInfo): ExtractedMediaInfo {
+        if (info.options.size <= 1) return info
+        val groupRegex = Regex(
+            """(?:Story|Slide|Video|Ảnh(?:\s*gốc)?(?:\s*HD)?)\s*#(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+        val dimRegex = Regex("""\(\d{2,4}x\d{2,4}\)""")
+
+        fun tierKeyFor(opt: MediaOption, groupKey: String): String {
+            return when (opt.mediaType) {
+                MediaType.AUDIO -> "audio"
+                MediaType.IMAGE -> if (groupKey == "main") "cover" else "image"
+                MediaType.VIDEO -> {
+                    val lower = opt.qualityLabel.lowercase(Locale.ROOT)
+                    when {
+                        lower.contains("2160") || lower.contains("4k") -> "2160p"
+                        lower.contains("1440") || lower.contains("2k") -> "1440p"
+                        lower.contains("1080") || lower.contains("full hd") -> "1080p"
+                        lower.contains("720") || lower.contains("hd") -> "720p"
+                        lower.contains("540") -> "540p"
+                        lower.contains("480") -> "480p"
+                        lower.contains("360") || lower.contains("sd") -> "360p"
+                        lower.contains("240") -> "240p"
+                        else -> lower.trim()
+                    }
+                }
+            }
+        }
+
+        val bestByBucket = LinkedHashMap<String, MediaOption>()
+        for (opt in info.options) {
+            val groupMatch = groupRegex.find(opt.qualityLabel)
+            val groupKey = if (groupMatch != null) "item_${groupMatch.groupValues[1]}" else "main"
+            val bucketKey = "$groupKey|${opt.mediaType.name}|${tierKeyFor(opt, groupKey)}"
+            val existing = bestByBucket[bucketKey]
+            if (existing == null) {
+                bestByBucket[bucketKey] = opt
+            } else if (opt.mediaType == MediaType.VIDEO) {
+                // Prefer progressive (audioUrl == null) with explicit dimensions `(WxH)` over silent/unlabeled DASH duplicate of same tier
+                val optHasDims = dimRegex.containsMatchIn(opt.qualityLabel)
+                val existingHasDims = dimRegex.containsMatchIn(existing.qualityLabel)
+                val optIsProgressive = opt.audioUrl == null
+                val existingIsProgressive = existing.audioUrl == null
+                if ((optHasDims && !existingHasDims) || (optIsProgressive && !existingIsProgressive && !existingHasDims)) {
+                    bestByBucket[bucketKey] = opt.copy(isHighestQuality = existing.isHighestQuality || opt.isHighestQuality)
+                }
+            }
+        }
+
+        val deduped = bestByBucket.values.toMutableList()
+        if (deduped.isNotEmpty() && deduped.none { it.isHighestQuality }) {
+            val firstVidIdx = deduped.indexOfFirst { it.mediaType == MediaType.VIDEO }.takeIf { it >= 0 } ?: 0
+            deduped[firstVidIdx] = deduped[firstVidIdx].copy(isHighestQuality = true)
+        }
+        return info.copy(options = deduped)
     }
 
     private fun looksLikeVideoPost(url: String, platform: SocialPlatform): Boolean {
@@ -2719,15 +2782,17 @@ class MultiPlatformExtractor(private val context: Context) {
                 .ifBlank { extractHtmlTagTitle(rawHtml) }
                 .ifBlank { "Video ${platform.displayName}" }
 
-        return ExtractedMediaInfo(
-            originalUrl = pageUrl,
-            cleanUrl = cleanUrl,
-            platform = platform,
-            title = resolvedTitle,
-            author = desktopUpgradeInfo?.author ?: platform.displayName,
-            thumbnailUrl = ogImage,
-            durationSeconds = desktopUpgradeInfo?.durationSeconds ?: 0L,
-            options = finalOptions
+        return deduplicateMediaInfo(
+            ExtractedMediaInfo(
+                originalUrl = pageUrl,
+                cleanUrl = cleanUrl,
+                platform = platform,
+                title = resolvedTitle,
+                author = desktopUpgradeInfo?.author ?: platform.displayName,
+                thumbnailUrl = ogImage,
+                durationSeconds = desktopUpgradeInfo?.durationSeconds ?: 0L,
+                options = finalOptions
+            )
         )
     }
 

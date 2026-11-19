@@ -678,79 +678,98 @@ struct ContentView: View {
                     ForEach(info.options) { option in
                         let isChecked = checkedOptionIds.contains(option.id)
                         let isPreviewFocused = selectedOption?.id == option.id
-                        Button(action: {
-                            withAnimation(.spring(response: 0.26, dampingFraction: 0.80)) {
-                                if checkedOptionIds.contains(option.id) {
-                                    if checkedOptionIds.count > 1 {
-                                        checkedOptionIds.remove(option.id)
+                        HStack(spacing: 8) {
+                            Button(action: {
+                                withAnimation(.spring(response: 0.26, dampingFraction: 0.80)) {
+                                    if checkedOptionIds.contains(option.id) {
+                                        if checkedOptionIds.count > 1 {
+                                            checkedOptionIds.remove(option.id)
+                                        }
+                                    } else {
+                                        checkedOptionIds.insert(option.id)
                                     }
-                                } else {
-                                    checkedOptionIds.insert(option.id)
+                                    selectedOption = option
                                 }
-                                selectedOption = option
+                            }) {
+                                HStack(spacing: 10) {
+                                    Image(
+                                        systemName: isChecked
+                                            ? "checkmark.square.fill"
+                                            : "square"
+                                    )
+                                    .font(.system(size: 17, weight: .bold))
+                                    .foregroundColor(isChecked ? .cyan : .white.opacity(0.45))
+
+                                    Image(
+                                        systemName: option.mediaType == .audio
+                                            ? "waveform.circle.fill"
+                                            : (option.mediaType == .image ? "photo.fill" : "video.fill")
+                                    )
+                                    .foregroundColor(isChecked ? .cyan : .white.opacity(0.75))
+                                    .font(.system(size: 14))
+
+                                    Text(option.qualityLabel)
+                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    if option.audioUrl != nil {
+                                        LiquidGlassBadge(
+                                            text: "+ Âm thanh gốc",
+                                            systemImage: "speaker.wave.2.fill",
+                                            color: .purple
+                                        )
+                                    }
+
+                                    if option.isHighestQuality {
+                                        LiquidGlassBadge(
+                                            text: "TỐT NHẤT",
+                                            systemImage: "crown.fill",
+                                            color: .green
+                                        )
+                                    }
+                                }
+                                .contentShape(Rectangle())
                             }
-                        }) {
-                            HStack(spacing: 10) {
-                                Image(
-                                    systemName: isChecked
-                                        ? "checkmark.square.fill"
-                                        : "square"
-                                )
-                                .font(.system(size: 17, weight: .bold))
-                                .foregroundColor(isChecked ? .cyan : .white.opacity(0.45))
+                            .buttonStyle(LiquidSpringButtonStyle(scaleAmount: 0.98))
 
-                                Image(
-                                    systemName: option.mediaType == .audio
-                                        ? "waveform.circle.fill"
-                                        : (option.mediaType == .image ? "photo.fill" : "video.fill")
-                                )
-                                .foregroundColor(isChecked ? .cyan : .white.opacity(0.75))
-                                .font(.system(size: 14))
-
-                                Text(option.qualityLabel)
-                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-
-                                Spacer()
-
-                                if option.audioUrl != nil {
-                                    LiquidGlassBadge(
-                                        text: "+ Âm thanh gốc",
-                                        systemImage: "speaker.wave.2.fill",
-                                        color: .purple
+                            if option.mediaType == .video, let streamUrl = URL(string: option.url) {
+                                Button(action: {
+                                    activeVideoTarget = PlayableVideoTarget(
+                                        url: streamUrl,
+                                        title: "\(info.title) • \(option.qualityLabel)"
                                     )
+                                }) {
+                                    Image(systemName: "play.circle.fill")
+                                        .font(.system(size: 22, weight: .semibold))
+                                        .foregroundColor(.cyan)
+                                        .contentShape(Circle())
                                 }
-
-                                if option.isHighestQuality {
-                                    LiquidGlassBadge(
-                                        text: "TỐT NHẤT",
-                                        systemImage: "crown.fill",
-                                        color: .green
-                                    )
-                                }
+                                .buttonStyle(LiquidSpringButtonStyle(scaleAmount: 0.92))
+                                .accessibilityLabel("Xem thử \(option.qualityLabel)")
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(
-                                        isChecked
-                                            ? Color.cyan.opacity(0.22)
-                                            : (isPreviewFocused ? Color.white.opacity(0.10) : Color.white.opacity(0.06))
-                                    )
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .strokeBorder(
-                                        isChecked
-                                            ? Color.cyan.opacity(0.85)
-                                            : Color.white.opacity(0.14),
-                                        lineWidth: isChecked ? 1.3 : 1.0
-                                    )
-                            )
                         }
-                        .buttonStyle(LiquidSpringButtonStyle(scaleAmount: 0.98))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(
+                                    isChecked
+                                        ? Color.cyan.opacity(0.22)
+                                        : (isPreviewFocused ? Color.white.opacity(0.10) : Color.white.opacity(0.06))
+                                )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(
+                                    isChecked
+                                        ? Color.cyan.opacity(0.85)
+                                        : Color.white.opacity(0.14),
+                                    lineWidth: isChecked ? 1.3 : 1.0
+                                )
+                        )
                     }
                 }
 

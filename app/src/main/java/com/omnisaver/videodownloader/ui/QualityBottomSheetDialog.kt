@@ -269,6 +269,72 @@ class QualityBottomSheetDialog(
         }
     }
 
+    private fun showInlineVideoPreviewDialog(option: MediaOption) {
+        val density = context.resources.displayMetrics.density
+        val container = android.widget.FrameLayout(context).apply {
+            setBackgroundColor(Color.parseColor("#0B1120"))
+            val hPx = (360 * density).toInt()
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, hPx)
+        }
+        val videoView = android.widget.VideoView(context).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (360 * density).toInt(),
+                android.view.Gravity.CENTER
+            )
+        }
+        val progress = android.widget.ProgressBar(context).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER
+            )
+        }
+        container.addView(videoView)
+        container.addView(progress)
+
+        val controller = android.widget.MediaController(context)
+        controller.setAnchorView(videoView)
+        videoView.setMediaController(controller)
+        videoView.setOnPreparedListener { mp ->
+            progress.visibility = View.GONE
+            mp.isLooping = true
+            videoView.start()
+        }
+        videoView.setOnErrorListener { _, _, _ ->
+            progress.visibility = View.GONE
+            android.widget.Toast.makeText(
+                context,
+                "Không thể phát xem thử luồng này (luồng DASH cần tải xuống để ghép kênh).",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            true
+        }
+
+        val headers = HashMap<String, String>(option.customHeaders)
+        if (!headers.containsKey("Referer") && mediaInfo.platform.referer.isNotBlank()) {
+            headers["Referer"] = mediaInfo.platform.referer
+        }
+        videoView.setVideoURI(android.net.Uri.parse(option.url), headers)
+
+        val previewDialog = androidx.appcompat.app.AlertDialog.Builder(context)
+            .setTitle("Xem thử • ${option.qualityLabel}")
+            .setView(container)
+            .setPositiveButton("Tải ngay") { d, _ ->
+                videoView.stopPlayback()
+                d.dismiss()
+                onOptionSelected(option)
+                dismiss()
+            }
+            .setNegativeButton("Đóng") { d, _ ->
+                videoView.stopPlayback()
+                d.dismiss()
+            }
+            .create()
+        previewDialog.setOnDismissListener { videoView.stopPlayback() }
+        previewDialog.show()
+    }
+
     private inner class QualityOptionAdapter(
         private val options: List<MediaOption>,
         private val platform: SocialPlatform,
@@ -312,7 +378,8 @@ class QualityBottomSheetDialog(
             }
 
             val sizeSuffix = if (option.sizeText.isNotBlank()) " • ${option.sizeText}" else ""
-            holder.tvExtensionAndSize.text = ".$normalizedExt$sizeSuffix"
+            val previewHint = if (option.mediaType == MediaType.VIDEO) " • Bấm ▶ xem thử" else ""
+            holder.tvExtensionAndSize.text = ".$normalizedExt$sizeSuffix$previewHint"
 
             when (option.mediaType) {
                 MediaType.VIDEO -> {
@@ -365,6 +432,12 @@ class QualityBottomSheetDialog(
             holder.cardQualityOption.setOnClickListener {
                 onToggleIndex(position)
                 notifyItemChanged(position)
+            }
+
+            holder.cardTypeIcon.setOnClickListener {
+                if (option.mediaType == MediaType.VIDEO) {
+                    showInlineVideoPreviewDialog(option)
+                }
             }
 
             holder.ivDownloadAction.setOnClickListener {

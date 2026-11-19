@@ -1,11 +1,11 @@
 {
-    "versionCode":  9,
-    "versionName":  "2.6.0-FullHD",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6_FullHD.apk",
-    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6_FullHD.ipa",
-    "changelog":  "• Nâng cấp Ô nhập Đa dòng thông minh + nút \u0027+ Dán thêm\u0027: Cho phép dán hoặc cộng dồn nhiều link liên tiếp (tự động lọc trùng link) và bấm 1 nút \u0027Tải Hàng Loạt X Link (Full HD)\u0027 ngay trên màn hình chính\n• Bổ sung Checkbox tích chọn đa mục + nút \u0027Chọn tất cả\u0027: Cho phép tích chọn tuỳ ý nhiều Story / Slide / Ảnh / Video và tải cùng lúc trong 1 lần chạm\n• Đồng bộ 100% tính năng tải hàng loạt trên cả iOS (.ipa) và Android (.apk)",
-    "publishedAt":  "2026-11-18",
-    "fileSizeBytes":  5384590,
-    "sha256":  "b0ba8f552fb1060a82a6d509ef30eeb956c05915ee01c70b45ed9757697b4791",
+    "versionCode":  10,
+    "versionName":  "2.6.1-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.1-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.1_FullHD.apk",
+    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.1-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.1_FullHD.ipa",
+    "changelog":  "• Gộp sạch các luồng trùng độ phân giải trên cùng 1 video (khắc phục triệt để tình trạng Instagram Story hiện 13 dòng HD 720p giống hệt nhau; mỗi mức 1080p / 720p / SD chỉ giữ 1 bản nét nhất kèm thông số kích thước WxH)\n• Bổ sung nút ▶ Xem thử video trực tiếp ngay trên từng dòng chọn tải (cả Android và iOS) để xem chắc chắn đúng video trước khi tải",
+    "publishedAt":  "2026-11-19",
+    "fileSizeBytes":  5386934,
+    "sha256":  "948b35b375e6c640cbfe8e134d7353426ea4e033f2a4bff49aec5c151c53fb35",
     "forceUpdate":  false
 }

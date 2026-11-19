@@ -68,7 +68,7 @@ final class MultiPlatformExtractor {
             let hasPrimaryMedia = info.options.contains(where: { $0.mediaType == .video || $0.mediaType == .audio }) ||
                 (!looksLikeVideoPost(url: cleanUrl, platform: info.platform) && !info.options.isEmpty)
             if hasPrimaryMedia {
-                return info
+                return withDeduplicatedOptions(info)
             }
         }
 
@@ -77,7 +77,7 @@ final class MultiPlatformExtractor {
             detectedPlatform: initialPlatform,
             originalInput: rawInput
         ), !cobaltInfo.options.isEmpty {
-            return cobaltInfo
+            return withDeduplicatedOptions(cobaltInfo)
         }
 
         var rapidError: Error?
@@ -88,14 +88,14 @@ final class MultiPlatformExtractor {
                 originalInput: rawInput
             )
             if !rapidInfo.options.isEmpty {
-                return rapidInfo
+                return withDeduplicatedOptions(rapidInfo)
             }
         } catch {
             rapidError = error
         }
 
         if let info = directInfo, !info.options.isEmpty {
-            return info
+            return withDeduplicatedOptions(info)
         }
 
         let errorMessage = rapidError?.localizedDescription
@@ -480,8 +480,106 @@ final class MultiPlatformExtractor {
             author: desktopUpgradeInfo?.author ?? platform.displayName,
             thumbnailUrl: ogImage,
             durationSeconds: desktopUpgradeInfo?.durationSeconds ?? 0,
-            options: finalOptions
+            options: deduplicateQualityOptions(finalOptions)
         )
+    }
+
+    private func withDeduplicatedOptions(_ info: ExtractedMediaInfo) -> ExtractedMediaInfo {
+        ExtractedMediaInfo(
+            originalUrl: info.originalUrl,
+            platform: info.platform,
+            title: info.title,
+            author: info.author,
+            thumbnailUrl: info.thumbnailUrl,
+            durationSeconds: info.durationSeconds,
+            options: deduplicateQualityOptions(info.options)
+        )
+    }
+
+    private func deduplicateQualityOptions(_ options: [MediaOption]) -> [MediaOption] {
+        guard options.count > 1 else { return options }
+
+        var deduped: [MediaOption] = []
+        var keyToIndex: [String: Int] = [:]
+        let itemGroupPattern = #"(?i)(?:Story|Slide|Video|Ảnh(?:\s*gốc)?(?:\s*HD)?)\s*#(\d+)"#
+        let dimsPattern = #"\(\d{3,4}x\d{3,4}\)"#
+
+        for opt in options {
+            let groupKey: String
+            if let num = firstRegexMatch(pattern: itemGroupPattern, in: opt.qualityLabel)?.group(1) {
+                groupKey = "item_\(num)"
+            } else {
+                groupKey = "main"
+            }
+
+            let lowerLabel = opt.qualityLabel.lowercased()
+            let tierKey: String
+            switch opt.mediaType {
+            case .audio:
+                tierKey = "audio"
+            case .image:
+                tierKey = (groupKey == "main") ? "cover" : "image"
+            case .video:
+                if lowerLabel.contains("2160") || lowerLabel.contains("4k") {
+                    tierKey = "2160p"
+                } else if lowerLabel.contains("1440") || lowerLabel.contains("2k") {
+                    tierKey = "1440p"
+                } else if lowerLabel.contains("1080") || lowerLabel.contains("full hd") {
+                    tierKey = "1080p"
+                } else if lowerLabel.contains("720") || lowerLabel.contains("hd") {
+                    tierKey = "720p"
+                } else if lowerLabel.contains("540") {
+                    tierKey = "540p"
+                } else if lowerLabel.contains("480") {
+                    tierKey = "480p"
+                } else if lowerLabel.contains("360") || lowerLabel.contains("sd") {
+                    tierKey = "360p"
+                } else if lowerLabel.contains("240") {
+                    tierKey = "240p"
+                } else {
+                    tierKey = lowerLabel
+                }
+            }
+
+            let dedupeKey = "\(groupKey)|\(opt.mediaType.rawValue)|\(tierKey)"
+            if let existingIdx = keyToIndex[dedupeKey] {
+                let existing = deduped[existingIdx]
+                let existingHasDims = firstRegexMatch(pattern: dimsPattern, in: existing.qualityLabel) != nil
+                let candidateHasDims = firstRegexMatch(pattern: dimsPattern, in: opt.qualityLabel) != nil
+                if !existingHasDims && candidateHasDims {
+                    deduped[existingIdx] = MediaOption(
+                        url: opt.url,
+                        qualityLabel: opt.qualityLabel,
+                        fileExtension: opt.fileExtension,
+                        mediaType: opt.mediaType,
+                        isHighestQuality: existing.isHighestQuality || opt.isHighestQuality,
+                        isNoWatermark: opt.isNoWatermark,
+                        customHeaders: opt.customHeaders,
+                        audioUrl: opt.audioUrl ?? existing.audioUrl
+                    )
+                }
+            } else {
+                keyToIndex[dedupeKey] = deduped.count
+                deduped.append(opt)
+            }
+        }
+
+        if !deduped.isEmpty && !deduped.contains(where: { $0.isHighestQuality }) {
+            let bestIdx = deduped.firstIndex(where: { $0.mediaType == .video }) ?? 0
+            let best = deduped[bestIdx]
+            deduped[bestIdx] = MediaOption(
+                url: best.url,
+                qualityLabel: best.qualityLabel,
+                fileExtension: best.fileExtension,
+                mediaType: best.mediaType,
+                isHighestQuality: true,
+                isNoWatermark: best.isNoWatermark,
+                customHeaders: best.customHeaders,
+                audioUrl: best.audioUrl
+            )
+        }
+
+        return deduped
     }
 
     // MARK: - Direct Platform Router
@@ -2728,24 +2826,26 @@ final class MultiPlatformExtractor {
                 let height = Int(firstRegexMatch(pattern: #""height"\s*:\s*(\d+)"#, in: objText)?.group(1) ?? "") ?? 0
                 let maxDim = max(width, height)
                 let minDim = (width > 0 && height > 0) ? min(width, height) : 0
-                let score: Int
+                let baseScore: Int
                 if minDim >= 1080 || maxDim >= 1920 {
-                    score = 1080
+                    baseScore = 1080
                 } else if minDim >= 720 || maxDim >= 1280 {
-                    score = 720
+                    baseScore = 720
                 } else if minDim >= 540 {
-                    score = 540
+                    baseScore = 540
                 } else if minDim >= 480 {
-                    score = 480
+                    baseScore = 480
                 } else {
-                    score = 800
+                    baseScore = 800
                 }
+                let hasDims = (width > 0 && height > 0)
+                let score = hasDims ? (baseScore + 10) : baseScore
 
-                let dimBadge = (width > 0 && height > 0) ? " (\(width)x\(height))" : ""
+                let dimBadge = hasDims ? " (\(width)x\(height))" : ""
                 let label: String
-                if score >= 1080 {
+                if baseScore >= 1080 {
                     label = "Full HD 1080p\(dimBadge) (MP4)"
-                } else if score >= 720 {
+                } else if baseScore >= 720 {
                     label = "HD 720p\(dimBadge) (MP4)"
                 } else {
                     label = "SD Video\(dimBadge) (MP4)"
