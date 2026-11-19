@@ -1,11 +1,11 @@
 {
-    "versionCode":  11,
-    "versionName":  "2.6.2-FullHD",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.2-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.2_FullHD.apk",
-    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.2-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.2_FullHD.ipa",
-    "changelog":  "• Sửa triệt để lỗi vỡ khung huy hiệu \u0027TỐT NHẤT\u0027 bị ép dọc thành vạch xanh trên thẻ chọn chất lượng\n• Sửa hiển thị ảnh thu nhỏ (Thumbnail) trên Instagram Story riêng tư bằng JSON parser chuẩn \u0026 đính kèm Cookie\n• Bổ sung bóc tách trọn bộ tất cả Story Instagram đang có của người đó (giống Facebook), hiển thị rõ thứ tự và giờ đăng từng Story (Story #1 • 09:40, Story #2 (Link này • 10:15)...) kèm tải hàng loạt 1 chạm",
+    "versionCode":  12,
+    "versionName":  "2.7.0-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.7.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.7_FullHD.apk",
+    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.7.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.7_FullHD.ipa",
+    "changelog":  "• Trọn gói Tải Ảnh Toàn Diện (v2.7.0-FullHD): Bóc tách đầy đủ Album nhiều ảnh \u0026 Carousel trộn Ảnh + Video trên Instagram (/p/...), Facebook, Threads, TikTok, X\n• Hiện ảnh thu nhỏ thật ngay trên từng dòng Ảnh (Story Ảnh / Slide Ảnh / Album) kèm nút 🔍 bấm xem phóng to ảnh nét trước khi tải\n• Tự động lưu ảnh tải về vào thẳng Album \u0027OmniSaver\u0027 trong Bộ sưu tập / Thư viện Ảnh điện thoại trên cả Android và iOS",
     "publishedAt":  "2026-11-19",
-    "fileSizeBytes":  5380786,
-    "sha256":  "9eb94277ba5b1f3838687df84c657cd42fb2b4cdfc64048f8e9bf9f3b9564bbf",
+    "fileSizeBytes":  5387894,
+    "sha256":  "f7fc8836f4ef1fe6404c0d22c527c5f2bc804417458a03a3f08361518bcf31d5",
     "forceUpdate":  false
 }

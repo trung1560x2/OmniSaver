@@ -339,10 +339,38 @@ class OmniDownloadManager(private val context: Context) {
                 when (status) {
                     DownloadManager.STATUS_SUCCESSFUL -> {
                         val targetFile = getTargetFile(mediaInfo, fileName)
+                        val resolvedMime = when (option.mediaType) {
+                            MediaType.IMAGE -> if (fileName.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg"
+                            MediaType.AUDIO -> if (fileName.endsWith(".m4a", ignoreCase = true)) "audio/mp4" else "audio/mpeg"
+                            MediaType.VIDEO -> "video/mp4"
+                        }
+                        if (option.mediaType == MediaType.IMAGE && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && targetFile.exists()) {
+                            runCatching {
+                                val values = android.content.ContentValues().apply {
+                                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, resolvedMime)
+                                    put(
+                                        android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                                        "${Environment.DIRECTORY_PICTURES}/OmniSaver"
+                                    )
+                                    put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
+                                }
+                                val resolver = context.contentResolver
+                                val imgUri = resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                                if (imgUri != null) {
+                                    resolver.openOutputStream(imgUri)?.use { out ->
+                                        targetFile.inputStream().use { inp -> inp.copyTo(out) }
+                                    }
+                                    values.clear()
+                                    values.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0)
+                                    resolver.update(imgUri, values, null, null)
+                                }
+                            }
+                        }
                         MediaScannerConnection.scanFile(
                             context,
                             arrayOf(targetFile.absolutePath),
-                            null,
+                            arrayOf(resolvedMime),
                             null
                         )
                         emit(

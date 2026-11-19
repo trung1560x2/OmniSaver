@@ -78,15 +78,15 @@ struct OtaCheckResult: Equatable {
 final class OtaUpdateManager: ObservableObject {
     static let shared = OtaUpdateManager()
 
-    static let currentVersionCode: Int = 11
-    static let currentVersionName: String = "2.6.2-FullHD"
+    static let currentVersionCode: Int = 12
+    static let currentVersionName: String = "2.7.0-FullHD"
 
     static let defaultManifestUrl =
         "https://raw.githubusercontent.com/trung1560x2/OmniSaver/main/ota-version.json"
     static let fallbackGitHubReleasesApi =
         "https://api.github.com/repos/trung1560x2/OmniSaver/releases/latest"
     static let fallbackIpaDownloadUrl =
-        "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.2-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.2_FullHD.ipa"
+        "https://github.com/trung1560x2/OmniSaver/releases/download/v2.7.0-FullHD/OmniSaver_iOS27_LiquidGlass_v2.7_FullHD.ipa"
 
     private let defaults = UserDefaults.standard
     private let manifestUrlKey = "omnisaver_ios_ota_manifest_url"

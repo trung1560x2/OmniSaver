@@ -1395,6 +1395,8 @@ class MultiPlatformExtractor(private val context: Context) {
         var ogTitle = ""
         var ogDescription = ""
         var detectedAuthor = ""
+        val albumPhotoUrls = ArrayList<String>()
+        val seenAlbumPhotoKeys = HashSet<String>()
 
         fun buildScoredCandidate(
             rawCandidate: String?,
@@ -1645,8 +1647,33 @@ class MultiPlatformExtractor(private val context: Context) {
                     .ifBlank { extractMetaContent(html, "og:video:url") }
             }
 
+            val fbPhotoPatterns = listOf(
+                Regex(""""viewer_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""""),
+                Regex(""""photo_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)"""")
+            )
+            for (pat in fbPhotoPatterns) {
+                for (pm in pat.findAll(unescaped)) {
+                    val cleanedPhoto = sanitizeCandidateUrl(pm.groupValues.getOrNull(1).orEmpty())
+                    val lowerPhoto = cleanedPhoto.lowercase(Locale.ROOT)
+                    if (cleanedPhoto.startsWith("http", ignoreCase = true) &&
+                        !lowerPhoto.contains("p50x50") &&
+                        !lowerPhoto.contains("s50x50") &&
+                        !lowerPhoto.contains("p100x100") &&
+                        !lowerPhoto.contains("s100x100") &&
+                        !lowerPhoto.contains("rsrc.php") &&
+                        !lowerPhoto.contains("emoji")
+                    ) {
+                        val key = cleanedPhoto.substringBefore('?')
+                        if (seenAlbumPhotoKeys.add(key)) {
+                            albumPhotoUrls.add(cleanedPhoto)
+                        }
+                    }
+                }
+            }
+
             if (ogImageUrl.isBlank()) {
                 ogImageUrl = extractMetaContent(html, "og:image")
+                    .ifBlank { albumPhotoUrls.firstOrNull().orEmpty() }
                     .ifBlank {
                         Regex(""""preferred_thumbnail"\s*:\s*\{.{0,180}?"uri"\s*:\s*"(https?:[^"]+)"""")
                             .find(unescaped)?.groupValues?.getOrNull(1).orEmpty()
@@ -1992,11 +2019,25 @@ class MultiPlatformExtractor(private val context: Context) {
             }
         }
 
-        if (ogImageUrl.startsWith("http", ignoreCase = true) && options.none { it.url == ogImageUrl }) {
+        if (storyGroups.isEmpty() && options.none { it.mediaType == MediaType.VIDEO } && albumPhotoUrls.isNotEmpty()) {
+            albumPhotoUrls.forEachIndexed { pIdx, pUrl ->
+                options.add(
+                    MediaOption(
+                        url = pUrl,
+                        qualityLabel = if (albumPhotoUrls.size > 1) "Ảnh gốc HD #${pIdx + 1} (JPG)" else "Ảnh gốc HD (JPG)",
+                        extension = "jpg",
+                        mediaType = MediaType.IMAGE,
+                        isHighestQuality = (pIdx == 0),
+                        isNoWatermark = true,
+                        customHeaders = fbHeaders
+                    )
+                )
+            }
+        } else if (ogImageUrl.startsWith("http", ignoreCase = true) && options.none { it.url == ogImageUrl }) {
             options.add(
                 MediaOption(
                     url = ogImageUrl,
-                    qualityLabel = "Ảnh bìa (Cover)",
+                    qualityLabel = if (options.isEmpty()) "Ảnh gốc HD (JPG)" else "Ảnh bìa (Cover)",
                     extension = "jpg",
                     mediaType = MediaType.IMAGE,
                     isHighestQuality = options.isEmpty(),
@@ -2418,6 +2459,89 @@ class MultiPlatformExtractor(private val context: Context) {
                     }
                 }
 
+                // Handle Instagram Multi-Photo / Mixed Carousel (`carousel_media`)
+                val carouselArr = parsedJsonItem?.optJSONArray("carousel_media")
+                if (carouselArr != null && carouselArr.length() > 0) {
+                    val carouselOptions = ArrayList<MediaOption>()
+                    var firstSlideThumb = ""
+                    for (sIdx in 0 until carouselArr.length()) {
+                        val slideObj = carouselArr.optJSONObject(sIdx) ?: continue
+                        val slideCands = slideObj.optJSONObject("image_versions2")?.optJSONArray("candidates")
+                        val topImgObj = if (slideCands != null && slideCands.length() > 0) slideCands.optJSONObject(0) else null
+                        val slideImgUrl = topImgObj?.optString("url", "").orEmpty()
+                        if (firstSlideThumb.isBlank() && slideImgUrl.startsWith("http", ignoreCase = true)) {
+                            firstSlideThumb = slideImgUrl
+                        }
+
+                        val slideVids = slideObj.optJSONArray("video_versions")
+                        if (slideVids != null && slideVids.length() > 0) {
+                            var bestVidUrl = ""
+                            var bestW = 0
+                            var bestH = 0
+                            for (vIdx in 0 until slideVids.length()) {
+                                val vObj = slideVids.optJSONObject(vIdx) ?: continue
+                                val u = vObj.optString("url", "").trim()
+                                val w = vObj.optInt("width", 0)
+                                val h = vObj.optInt("height", 0)
+                                if (u.startsWith("http", ignoreCase = true) && (bestVidUrl.isEmpty() || w * h > bestW * bestH)) {
+                                    bestVidUrl = u
+                                    bestW = w
+                                    bestH = h
+                                }
+                            }
+                            if (bestVidUrl.isNotEmpty()) {
+                                val minDim = if (bestW > 0 && bestH > 0) minOf(bestW, bestH) else 0
+                                val resTag = if (minDim >= 1080) "Full HD 1080p" else if (minDim >= 720) "HD 720p" else "HD Video"
+                                val dimBadge = if (bestW > 0 && bestH > 0) " (${bestW}x${bestH})" else ""
+                                carouselOptions.add(
+                                    MediaOption(
+                                        url = bestVidUrl,
+                                        qualityLabel = "Slide #${sIdx + 1} • $resTag$dimBadge (MP4)",
+                                        extension = "mp4",
+                                        mediaType = MediaType.VIDEO,
+                                        isHighestQuality = carouselOptions.isEmpty(),
+                                        isNoWatermark = true,
+                                        customHeaders = igHeaders
+                                    )
+                                )
+                            }
+                        } else if (slideImgUrl.startsWith("http", ignoreCase = true)) {
+                            val imgW = topImgObj?.optInt("width", 0) ?: 0
+                            val imgH = topImgObj?.optInt("height", 0) ?: 0
+                            val dimBadge = if (imgW > 0 && imgH > 0) " (${imgW}x${imgH})" else ""
+                            carouselOptions.add(
+                                MediaOption(
+                                    url = slideImgUrl,
+                                    qualityLabel = "Ảnh gốc HD #${sIdx + 1}$dimBadge (JPG)",
+                                    extension = "jpg",
+                                    mediaType = MediaType.IMAGE,
+                                    isHighestQuality = carouselOptions.isEmpty(),
+                                    isNoWatermark = true,
+                                    customHeaders = igHeaders
+                                )
+                            )
+                        }
+                    }
+
+                    if (carouselOptions.isNotEmpty()) {
+                        val username = parsedJsonItem.optJSONObject("user")?.optString("username", "")
+                            ?.takeIf { it.isNotBlank() }?.let { "@$it" } ?: "Instagram"
+                        val captionText = parsedJsonItem.optJSONObject("caption")?.optString("text", "")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: "Album ${carouselOptions.size} mục của $username (#$shortIgId)"
+                        return ExtractedMediaInfo(
+                            originalUrl = originalInput,
+                            cleanUrl = cleanUrl,
+                            platform = SocialPlatform.INSTAGRAM,
+                            title = captionText,
+                            author = username,
+                            thumbnailUrl = firstSlideThumb,
+                            durationSeconds = 0L,
+                            options = carouselOptions
+                        )
+                    }
+                }
+
                 val unescapedApi = unescapeHtmlAndJson(apiBody)
                 val versionCandidates = extractInstagramVideoVersionsFromText(unescapedApi).toMutableList()
                 val seenUrls = versionCandidates.map { it.url }.toMutableSet()
@@ -2639,11 +2763,39 @@ class MultiPlatformExtractor(private val context: Context) {
                 )
             }
 
-            if (imageUrl.startsWith("http", ignoreCase = true)) {
+            val displayPhotoUrls = ArrayList<String>()
+            val seenDisplayPhotoKeys = HashSet<String>()
+            Regex(""""display_url"\s*:\s*"(https?:[^"]+)"""").findAll(unescaped).forEach { dm ->
+                val pUrl = sanitizeCandidateUrl(dm.groupValues.getOrNull(1).orEmpty())
+                val lowerP = pUrl.lowercase(Locale.ROOT)
+                if (pUrl.startsWith("http", ignoreCase = true) &&
+                    !lowerP.contains("s150x150") &&
+                    !lowerP.contains("p150x150") &&
+                    seenDisplayPhotoKeys.add(pUrl.substringBefore('?'))
+                ) {
+                    displayPhotoUrls.add(pUrl)
+                }
+            }
+
+            if (options.isEmpty() && displayPhotoUrls.size >= 2) {
+                displayPhotoUrls.forEachIndexed { pIdx, pUrl ->
+                    options.add(
+                        MediaOption(
+                            url = pUrl,
+                            qualityLabel = "Ảnh gốc HD #${pIdx + 1} (JPG)",
+                            extension = "jpg",
+                            mediaType = MediaType.IMAGE,
+                            isHighestQuality = (pIdx == 0),
+                            isNoWatermark = true,
+                            customHeaders = igHeaders
+                        )
+                    )
+                }
+            } else if (imageUrl.startsWith("http", ignoreCase = true)) {
                 options.add(
                     MediaOption(
                         url = imageUrl,
-                        qualityLabel = if (options.isEmpty()) "Ảnh gốc HD" else "Ảnh bìa (Cover)",
+                        qualityLabel = if (options.isEmpty()) "Ảnh gốc HD (JPG)" else "Ảnh bìa (Cover)",
                         extension = "jpg",
                         mediaType = MediaType.IMAGE,
                         isHighestQuality = options.isEmpty(),
@@ -2680,9 +2832,6 @@ class MultiPlatformExtractor(private val context: Context) {
         return fallbackImageResult
     }
 
-    /**
-     * Threads direct page HTML extractor (sorts 1080p video_versions first).
-     */
     private fun extractThreadsDirect(originalInput: String, cleanUrl: String): ExtractedMediaInfo? {
         val cookie = authCookieStore.getEffectiveCookie(SocialPlatform.THREADS, cleanUrl)
         val threadsHeaders = buildMediaHeaders(SocialPlatform.THREADS, cookie)
@@ -2711,11 +2860,25 @@ class MultiPlatformExtractor(private val context: Context) {
                 .ifBlank { extractMetaContent(rawHtml, "og:video") }
                 .takeIf { it.isNotBlank() }
 
-        val imageUrl = extractMetaContent(rawHtml, "og:image")
-            .ifBlank {
-                Regex(""""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)"""")
-                    .find(unescaped)?.groupValues?.getOrNull(1)?.let { sanitizeCandidateUrl(it) }.orEmpty()
+        val carouselPhotos = ArrayList<String>()
+        val seenPhotoKeys = HashSet<String>()
+        Regex(""""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[\s\S]{0,500}?"url"\s*:\s*"(https?:[^"]+)"""")
+            .findAll(unescaped)
+            .forEach { m ->
+                val pUrl = sanitizeCandidateUrl(m.groupValues.getOrNull(1).orEmpty())
+                val lowerP = pUrl.lowercase(Locale.ROOT)
+                if (pUrl.startsWith("http", ignoreCase = true) &&
+                    !lowerP.contains("s150x150") &&
+                    !lowerP.contains("p150x150") &&
+                    !lowerP.contains("150x150") &&
+                    seenPhotoKeys.add(pUrl.substringBefore('?'))
+                ) {
+                    carouselPhotos.add(pUrl)
+                }
             }
+
+        val imageUrl = carouselPhotos.firstOrNull().orEmpty()
+            .ifBlank { extractMetaContent(rawHtml, "og:image") }
 
         val title = extractMetaContent(rawHtml, "og:description")
             .ifBlank { extractMetaContent(rawHtml, "og:title") }
@@ -2754,11 +2917,25 @@ class MultiPlatformExtractor(private val context: Context) {
             )
         }
 
-        if (imageUrl.startsWith("http", ignoreCase = true)) {
+        if (options.isEmpty() && carouselPhotos.size >= 2) {
+            carouselPhotos.forEachIndexed { pIdx, pUrl ->
+                options.add(
+                    MediaOption(
+                        url = pUrl,
+                        qualityLabel = "Ảnh gốc HD #${pIdx + 1} (JPG)",
+                        extension = "jpg",
+                        mediaType = MediaType.IMAGE,
+                        isHighestQuality = (pIdx == 0),
+                        isNoWatermark = true,
+                        customHeaders = threadsHeaders
+                    )
+                )
+            }
+        } else if (imageUrl.startsWith("http", ignoreCase = true)) {
             options.add(
                 MediaOption(
                     url = imageUrl,
-                    qualityLabel = if (options.isEmpty()) "Ảnh gốc HD" else "Ảnh bìa (Cover)",
+                    qualityLabel = if (options.isEmpty()) "Ảnh gốc HD (JPG)" else "Ảnh bìa (Cover)",
                     extension = "jpg",
                     mediaType = MediaType.IMAGE,
                     isHighestQuality = options.isEmpty(),

@@ -196,9 +196,15 @@ final class OmniDownloadManager: ObservableObject {
 
                 let optionsToDownload: [MediaOption]
                 let batchCandidates = info.batchDownloadOptions
-                if info.platform == .tiktok,
-                   !batchCandidates.isEmpty,
-                   batchCandidates.allSatisfy({ $0.mediaType == .image }) {
+                let isStoryUrl = rawUrl.lowercased().contains("/stories/")
+                let isPhotoCarousel = !batchCandidates.isEmpty &&
+                    !isStoryUrl &&
+                    batchCandidates.allSatisfy({ $0.mediaType == .image })
+                let isMixedPostCarousel = !isStoryUrl &&
+                    batchCandidates.count >= 2 &&
+                    (info.platform == .instagram || info.platform == .tiktok || info.platform == .threads || info.platform == .xTwitter)
+
+                if isPhotoCarousel || isMixedPostCarousel {
                     optionsToDownload = batchCandidates
                 } else if let bestOpt = info.bestOption {
                     optionsToDownload = [bestOpt]
@@ -213,8 +219,9 @@ final class OmniDownloadManager: ObservableObject {
 
                 for (subIdx, opt) in optionsToDownload.enumerated() {
                     let subStartFrac = urlStartFrac + Double(subIdx) * subSpan
+                    let itemNoun = opt.mediaType == .image ? "Ảnh" : "Mục"
                     let stepPrefix = optCount > 1
-                        ? "\(linkPrefix)Ảnh \(subIdx + 1)/\(optCount) • "
+                        ? "\(linkPrefix)\(itemNoun) \(subIdx + 1)/\(optCount) • "
                         : linkPrefix
 
                     do {

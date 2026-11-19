@@ -436,6 +436,155 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
+// MARK: - Full HD Image Preview Sheet
+
+struct ImagePreviewSheet: View {
+    let url: URL
+    var title: String = "Xem Ảnh Full HD"
+    var onDownload: (() -> Void)? = nil
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var showShareSheet = false
+    @State private var zoomScale: CGFloat = 1.0
+    @State private var lastZoomScale: CGFloat = 1.0
+
+    var body: some View {
+        ZStack {
+            LiquidGlassBackgroundView()
+
+            VStack(spacing: 14) {
+                // Header bar
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Text(url.isFileURL ? url.lastPathComponent : (url.host ?? "Ảnh gốc Full HD"))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.65))
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    LiquidGlassPillButton(
+                        title: "Chia sẻ",
+                        systemImage: "square.and.arrow.up",
+                        tintColor: .cyan
+                    ) {
+                        showShareSheet = true
+                    }
+
+                    LiquidGlassPillButton(
+                        title: "Đóng",
+                        systemImage: "xmark",
+                        tintColor: .pink
+                    ) {
+                        dismiss()
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
+                // Image Viewer Container
+                GeometryReader { geo in
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.black.opacity(0.35))
+
+                        if url.isFileURL, let localImage = UIImage(contentsOfFile: url.path) {
+                            Image(uiImage: localImage)
+                                .resizable()
+                                .scaledToFit()
+                                .scaleEffect(zoomScale)
+                                .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
+                        } else {
+                            AsyncImage(url: url) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .scaledToFit()
+                                        .scaleEffect(zoomScale)
+                                        .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
+                                case .failure:
+                                    VStack(spacing: 10) {
+                                        Image(systemName: "photo.badge.exclamationmark.fill")
+                                            .font(.system(size: 36, weight: .bold))
+                                            .foregroundColor(.pink.opacity(0.85))
+                                        Text("Không thể tải bản xem trước ảnh.")
+                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                            .foregroundColor(.white.opacity(0.75))
+                                    }
+                                default:
+                                    VStack(spacing: 12) {
+                                        ProgressView()
+                                            .progressViewStyle(CircularProgressViewStyle(tint: .cyan))
+                                            .scaleEffect(1.2)
+                                        Text("Đang tải ảnh gốc HD...")
+                                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                                            .foregroundColor(.white.opacity(0.75))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
+                    )
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { val in
+                                let updated = lastZoomScale * val
+                                zoomScale = min(max(updated, 1.0), 4.0)
+                            }
+                            .onEnded { _ in
+                                if zoomScale < 1.05 {
+                                    withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                                        zoomScale = 1.0
+                                    }
+                                }
+                                lastZoomScale = zoomScale
+                            }
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                            if zoomScale > 1.1 {
+                                zoomScale = 1.0
+                                lastZoomScale = 1.0
+                            } else {
+                                zoomScale = 2.2
+                                lastZoomScale = 2.2
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+
+                if let onDownload = onDownload {
+                    LiquidGlassPrimaryButton(
+                        title: "Tải Ảnh Này về Thư viện Ảnh",
+                        systemImage: "arrow.down.to.line.compact"
+                    ) {
+                        onDownload()
+                        dismiss()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
+                } else {
+                    Spacer().frame(height: 6)
+                }
+            }
+        }
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(items: [url])
+        }
+    }
+}
+
 // MARK: - Full HD Video Player Sheet (AVPlayerViewController)
 
 struct VideoPlayerSheet: View {

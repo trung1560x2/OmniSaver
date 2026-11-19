@@ -1995,6 +1995,8 @@ final class MultiPlatformExtractor {
         var ogTitle = ""
         var ogDescription = ""
         var detectedAuthor = ""
+        var albumPhotoUrls: [String] = []
+        var seenAlbumPhotoPaths = Set<String>()
 
         func buildCandidateFromRaw(
             rawCandidate: String?,
@@ -2269,6 +2271,30 @@ final class MultiPlatformExtractor {
                         isTargetSlice: isT,
                         pairedAudioUrl: audUrl
                     )
+                }
+
+                let fbPhotoPatterns = [
+                    #""viewer_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""#,
+                    #""photo_image"\s*:\s*\{[^{}]*"uri"\s*:\s*"(https?:[^"]+)""#
+                ]
+                for pattern in fbPhotoPatterns {
+                    for m in regexMatches(pattern: pattern, in: unescaped) {
+                        guard let rawUri = m.group(1) else { continue }
+                        let cleaned = sanitizeCandidateUrl(rawUri)
+                        let lower = cleaned.lowercased()
+                        guard lower.hasPrefix("http"),
+                              !lower.contains("p50x50"),
+                              !lower.contains("s50x50"),
+                              !lower.contains("p100x100"),
+                              !lower.contains("s100x100"),
+                              !lower.contains("rsrc.php") else {
+                            continue
+                        }
+                        let pathKey = (cleaned.components(separatedBy: "?").first ?? cleaned).lowercased()
+                        if seenAlbumPhotoPaths.insert(pathKey).inserted {
+                            albumPhotoUrls.append(cleaned)
+                        }
+                    }
                 }
             }
 
@@ -2709,11 +2735,25 @@ final class MultiPlatformExtractor {
                 )
             }
 
-            if ogImageUrl.lowercased().hasPrefix("http") && optionSeenUrls.insert(ogImageUrl).inserted {
+            if videoCands.isEmpty && !albumPhotoUrls.isEmpty {
+                for (i, photoUrl) in albumPhotoUrls.enumerated() where optionSeenUrls.insert(photoUrl).inserted {
+                    options.append(
+                        MediaOption(
+                            url: photoUrl,
+                            qualityLabel: albumPhotoUrls.count > 1 ? "Ảnh gốc HD #\(i + 1) (JPG)" : "Ảnh gốc HD (JPG)",
+                            fileExtension: "jpg",
+                            mediaType: .image,
+                            isHighestQuality: i == 0,
+                            isNoWatermark: true,
+                            customHeaders: fbHeaders
+                        )
+                    )
+                }
+            } else if ogImageUrl.lowercased().hasPrefix("http") && optionSeenUrls.insert(ogImageUrl).inserted {
                 options.append(
                     MediaOption(
                         url: ogImageUrl,
-                        qualityLabel: "Ảnh bìa (Cover)",
+                        qualityLabel: options.isEmpty ? "Ảnh gốc HD (JPG)" : "Ảnh bìa (Cover)",
                         fileExtension: "jpg",
                         mediaType: .image,
                         isHighestQuality: options.isEmpty,
@@ -2735,11 +2775,20 @@ final class MultiPlatformExtractor {
             }()
 
             let isStory = finalResolvedUrl.lowercased().contains("/stories/")
+            let isPhotoAlbumPost = videoCands.isEmpty && !albumPhotoUrls.isEmpty
             let defaultFallbackTitle: String
             if isStory && !detectedAuthor.isEmpty {
                 defaultFallbackTitle = "Story của \(detectedAuthor) (#\(shortVid))"
             } else if isStory {
                 defaultFallbackTitle = "Facebook Story (#\(shortVid))"
+            } else if isPhotoAlbumPost && albumPhotoUrls.count > 1 {
+                defaultFallbackTitle = !detectedAuthor.isEmpty
+                    ? "Album \(albumPhotoUrls.count) Ảnh của \(detectedAuthor) (#\(shortVid))"
+                    : "Album \(albumPhotoUrls.count) Ảnh Facebook (#\(shortVid))"
+            } else if isPhotoAlbumPost {
+                defaultFallbackTitle = !detectedAuthor.isEmpty
+                    ? "Ảnh của \(detectedAuthor) (#\(shortVid))"
+                    : "Ảnh Facebook (#\(shortVid))"
             } else if !detectedAuthor.isEmpty {
                 defaultFallbackTitle = "Video của \(detectedAuthor) (#\(shortVid))"
             } else {
@@ -2769,12 +2818,16 @@ final class MultiPlatformExtractor {
 
         guard !options.isEmpty else { return nil }
 
+        let resolvedThumb = ogImageUrl.lowercased().hasPrefix("http")
+            ? ogImageUrl
+            : (albumPhotoUrls.first ?? ogImageUrl)
+
         return ExtractedMediaInfo(
             originalUrl: originalInput,
             platform: .facebook,
             title: safeTitle,
             author: resolvedAuthor,
-            thumbnailUrl: ogImageUrl,
+            thumbnailUrl: resolvedThumb,
             durationSeconds: 0,
             options: options
         )
@@ -3192,6 +3245,104 @@ final class MultiPlatformExtractor {
                     }
                 }
 
+                // 1a. Multi-Photo & Mixed Carousel parsing (`carousel_media`)
+                if let apiData = apiBody.data(using: .utf8),
+                   let json = (try? JSONSerialization.jsonObject(with: apiData)) as? [String: Any] {
+                    let firstItem = (json["items"] as? [[String: Any]])?.first
+                    if let carousel = firstItem?["carousel_media"] as? [[String: Any]], !carousel.isEmpty {
+                        var carouselOptions: [MediaOption] = []
+                        var firstSlideThumb = ""
+
+                        for (idx, slide) in carousel.enumerated() {
+                            let imgCands = (slide["image_versions2"] as? [String: Any])?["candidates"] as? [[String: Any]]
+                            let topImg = imgCands?.first
+                            let rawSlideImgUrl = (topImg?["url"] as? String) ?? ""
+                            let slideImgUrl = rawSlideImgUrl.isEmpty ? "" : sanitizeCandidateUrl(rawSlideImgUrl)
+                            if firstSlideThumb.isEmpty && slideImgUrl.lowercased().hasPrefix("http") {
+                                firstSlideThumb = slideImgUrl
+                            }
+
+                            if let vids = slide["video_versions"] as? [[String: Any]], !vids.isEmpty {
+                                let sortedVids = vids.sorted { lhs, rhs in
+                                    let lw = (lhs["width"] as? Int) ?? (lhs["width"] as? NSNumber)?.intValue ?? 0
+                                    let lh = (lhs["height"] as? Int) ?? (lhs["height"] as? NSNumber)?.intValue ?? 0
+                                    let rw = (rhs["width"] as? Int) ?? (rhs["width"] as? NSNumber)?.intValue ?? 0
+                                    let rh = (rhs["height"] as? Int) ?? (rhs["height"] as? NSNumber)?.intValue ?? 0
+                                    return (lw * lh) > (rw * rh)
+                                }
+                                if let bestVid = sortedVids.first,
+                                   let rawVUrl = bestVid["url"] as? String,
+                                   !rawVUrl.isEmpty {
+                                    let vUrl = sanitizeCandidateUrl(rawVUrl)
+                                    if vUrl.lowercased().hasPrefix("http") {
+                                        let width = (bestVid["width"] as? Int) ?? (bestVid["width"] as? NSNumber)?.intValue ?? 0
+                                        let height = (bestVid["height"] as? Int) ?? (bestVid["height"] as? NSNumber)?.intValue ?? 0
+                                        let hasDims = width > 0 && height > 0
+                                        let minDim = hasDims ? min(width, height) : 0
+                                        let maxDim = max(width, height)
+                                        let dimBadge = hasDims ? " (\(width)x\(height))" : ""
+                                        let qualityTier = (minDim >= 1080 || maxDim >= 1920) ? "Full HD" : "HD"
+                                        carouselOptions.append(
+                                            MediaOption(
+                                                url: vUrl,
+                                                qualityLabel: "Slide #\(idx + 1) • \(qualityTier)\(dimBadge) (MP4)",
+                                                fileExtension: "mp4",
+                                                mediaType: .video,
+                                                isHighestQuality: carouselOptions.isEmpty,
+                                                isNoWatermark: true,
+                                                customHeaders: igHeaders
+                                            )
+                                        )
+                                    }
+                                }
+                            } else if let topImg = topImg,
+                                      let rawImgUrl = topImg["url"] as? String,
+                                      !rawImgUrl.isEmpty {
+                                let imgUrl = sanitizeCandidateUrl(rawImgUrl)
+                                if imgUrl.lowercased().hasPrefix("http") {
+                                    let width = (topImg["width"] as? Int) ?? (topImg["width"] as? NSNumber)?.intValue ?? 0
+                                    let height = (topImg["height"] as? Int) ?? (topImg["height"] as? NSNumber)?.intValue ?? 0
+                                    let dimBadge = (width > 0 && height > 0) ? " (\(width)x\(height))" : ""
+                                    carouselOptions.append(
+                                        MediaOption(
+                                            url: imgUrl,
+                                            qualityLabel: "Ảnh gốc HD #\(idx + 1)\(dimBadge) (JPG)",
+                                            fileExtension: "jpg",
+                                            mediaType: .image,
+                                            isHighestQuality: carouselOptions.isEmpty,
+                                            isNoWatermark: true,
+                                            customHeaders: igHeaders
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        if !carouselOptions.isEmpty {
+                            let userDict = firstItem?["user"] as? [String: Any]
+                            let unameRaw = (userDict?["username"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                            let username = !unameRaw.isEmpty ? "@\(unameRaw)" : "Instagram"
+                            let captionDict = firstItem?["caption"] as? [String: Any]
+                            let rawCaption = ((captionDict?["text"] as? String) ?? "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            let shortId = String(mediaId.suffix(4))
+                            let captionText = !rawCaption.isEmpty
+                                ? rawCaption
+                                : "Album \(carouselOptions.count) mục của \(username) (#\(shortId))"
+
+                            return ExtractedMediaInfo(
+                                originalUrl: originalInput,
+                                platform: .instagram,
+                                title: captionText,
+                                author: username,
+                                thumbnailUrl: firstSlideThumb,
+                                durationSeconds: 0,
+                                options: carouselOptions
+                            )
+                        }
+                    }
+                }
+
                 var versionCandidates = extractInstagramVideoVersionsFromText(unescapedApi)
                 var seenUrls = Set(versionCandidates.map { $0.url })
 
@@ -3217,7 +3368,7 @@ final class MultiPlatformExtractor {
                     in: unescapedApi
                 )?.group(1).map { sanitizeCandidateUrl($0) } ?? ""
 
-                if !versionCandidates.isEmpty || (isIgStory && thumb.lowercased().hasPrefix("http")) {
+                if !versionCandidates.isEmpty || thumb.lowercased().hasPrefix("http") {
                     let username: String
                     if let uname = firstRegexMatch(pattern: #""username"\s*:\s*"([^"]+)""#, in: unescapedApi)?.group(1), !uname.isEmpty {
                         username = "@\(uname)"
@@ -3267,10 +3418,16 @@ final class MultiPlatformExtractor {
 
                     if thumb.lowercased().hasPrefix("http") {
                         let isPhotoOnly = options.isEmpty
+                        let photoLabel: String
+                        if isPhotoOnly {
+                            photoLabel = isIgStory ? "Ảnh Story HD (JPG)" : "Ảnh gốc HD (JPG)"
+                        } else {
+                            photoLabel = "Ảnh bìa HD (Cover)"
+                        }
                         options.append(
                             MediaOption(
                                 url: thumb,
-                                qualityLabel: isPhotoOnly ? "Ảnh Story HD (JPG)" : "Ảnh bìa HD (Cover)",
+                                qualityLabel: photoLabel,
                                 fileExtension: "jpg",
                                 mediaType: .image,
                                 isHighestQuality: isPhotoOnly,
@@ -3398,8 +3555,26 @@ final class MultiPlatformExtractor {
                 )
             }
 
-            let displayUrlFallback = firstRegexMatch(pattern: #""display_url"\s*:\s*"([^"]+)""#, in: unescaped)?
-                .group(1).map { sanitizeCandidateUrl($0) } ?? ""
+            var displayUrls: [String] = []
+            var seenDisplayPaths = Set<String>()
+            for m in regexMatches(pattern: #""display_url"\s*:\s*"(https?:[^"]+)""#, in: unescaped) {
+                guard let rawDisplay = m.group(1) else { continue }
+                let cleanedDisplay = sanitizeCandidateUrl(rawDisplay)
+                let lowerDisplay = cleanedDisplay.lowercased()
+                guard lowerDisplay.hasPrefix("http"),
+                      !lowerDisplay.contains("150x150"),
+                      !lowerDisplay.contains("s150x150") else {
+                    continue
+                }
+                let pathKey = (cleanedDisplay.components(separatedBy: "?").first ?? cleanedDisplay).lowercased()
+                if seenDisplayPaths.insert(pathKey).inserted {
+                    displayUrls.append(cleanedDisplay)
+                }
+            }
+
+            let displayUrlFallback = displayUrls.first
+                ?? (firstRegexMatch(pattern: #""display_url"\s*:\s*"([^"]+)""#, in: unescaped)?
+                    .group(1).map { sanitizeCandidateUrl($0) } ?? "")
             let imageUrl = firstNonEmpty(
                 extractMetaContent(html: rawHtml, property: "og:image"),
                 displayUrlFallback
@@ -3435,8 +3610,9 @@ final class MultiPlatformExtractor {
                 let rv = rhs.mediaType == .video ? 1 : 0
                 return lv != rv ? lv > rv : lhs.score > rhs.score
             }
+            let hasMixedSidecar = unescaped.contains("GraphSidecar") || unescaped.contains("edge_sidecar_to_children") || unescaped.contains("carousel_media")
             var markedHighest = false
-            for cand in sortedVideos {
+            for (vIdx, cand) in sortedVideos.enumerated() {
                 let isHighest: Bool
                 if cand.mediaType == .video && !markedHighest {
                     markedHighest = true
@@ -3444,10 +3620,13 @@ final class MultiPlatformExtractor {
                 } else {
                     isHighest = false
                 }
+                let vidLabel = (hasMixedSidecar && displayUrls.count >= 2 && cand.mediaType == .video)
+                    ? "Slide #\(vIdx + 1) • \(cand.label)"
+                    : cand.label
                 options.append(
                     MediaOption(
                         url: cand.url,
-                        qualityLabel: cand.label,
+                        qualityLabel: vidLabel,
                         fileExtension: cand.fileExtension,
                         mediaType: cand.mediaType,
                         isHighestQuality: isHighest,
@@ -3458,11 +3637,25 @@ final class MultiPlatformExtractor {
                 )
             }
 
-            if imageUrl.lowercased().hasPrefix("http") {
+            if displayUrls.count >= 2 && (scoredVideos.isEmpty || hasMixedSidecar) {
+                for (i, dUrl) in displayUrls.enumerated() {
+                    options.append(
+                        MediaOption(
+                            url: dUrl,
+                            qualityLabel: "Ảnh gốc HD #\(i + 1) (JPG)",
+                            fileExtension: "jpg",
+                            mediaType: .image,
+                            isHighestQuality: !markedHighest && i == 0,
+                            isNoWatermark: true,
+                            customHeaders: igHeaders
+                        )
+                    )
+                }
+            } else if imageUrl.lowercased().hasPrefix("http") {
                 options.append(
                     MediaOption(
                         url: imageUrl,
-                        qualityLabel: options.isEmpty ? "Ảnh gốc HD" : "Ảnh bìa (Cover)",
+                        qualityLabel: options.isEmpty ? "Ảnh gốc HD (JPG)" : "Ảnh bìa (Cover)",
                         fileExtension: "jpg",
                         mediaType: .image,
                         isHighestQuality: options.isEmpty,
@@ -3472,7 +3665,7 @@ final class MultiPlatformExtractor {
                 )
             }
 
-            if options.contains(where: { $0.mediaType == .video }) {
+            if options.contains(where: { $0.mediaType == .video }) || displayUrls.count >= 2 {
                 return ExtractedMediaInfo(
                     originalUrl: originalInput,
                     platform: .instagram,
@@ -3545,10 +3738,30 @@ final class MultiPlatformExtractor {
             extractMetaContent(html: rawHtml, property: "og:video")
         )
 
-        let candidateImg = firstRegexMatch(
+        var threadsPhotoUrls: [String] = []
+        var seenThreadsPhotoPaths = Set<String>()
+        for m in regexMatches(
+            pattern: #""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[\s\S]{0,500}?"url"\s*:\s*"(https?:[^"]+)""#,
+            in: unescaped
+        ) {
+            guard let rawPhoto = m.group(1) else { continue }
+            let cleanedPhoto = sanitizeCandidateUrl(rawPhoto)
+            let lowerPhoto = cleanedPhoto.lowercased()
+            guard lowerPhoto.hasPrefix("http"),
+                  !lowerPhoto.contains("150x150"),
+                  !lowerPhoto.contains("s150x150") else {
+                continue
+            }
+            let pathKey = (cleanedPhoto.components(separatedBy: "?").first ?? cleanedPhoto).lowercased()
+            if seenThreadsPhotoPaths.insert(pathKey).inserted {
+                threadsPhotoUrls.append(cleanedPhoto)
+            }
+        }
+
+        let candidateImg = threadsPhotoUrls.first ?? (firstRegexMatch(
             pattern: #""image_versions2"\s*:\s*\{[\s\S]{0,600}?"url"\s*:\s*"(https?:[^"]+)""#,
             in: unescaped
-        )?.group(1).map { sanitizeCandidateUrl($0) } ?? ""
+        )?.group(1).map { sanitizeCandidateUrl($0) } ?? "")
         let displayImg = firstRegexMatch(pattern: #""display_url"\s*:\s*"([^"]+)""#, in: unescaped)?
             .group(1).map { sanitizeCandidateUrl($0) } ?? ""
         let imageUrl = firstNonEmpty(
@@ -3608,11 +3821,25 @@ final class MultiPlatformExtractor {
             )
         }
 
-        if imageUrl.lowercased().hasPrefix("http") {
+        if threadsPhotoUrls.count >= 2 && versionCandidates.isEmpty && !fallbackVideoUrl.lowercased().hasPrefix("http") {
+            for (i, photoUrl) in threadsPhotoUrls.enumerated() {
+                options.append(
+                    MediaOption(
+                        url: photoUrl,
+                        qualityLabel: "Ảnh gốc HD #\(i + 1) (JPG)",
+                        fileExtension: "jpg",
+                        mediaType: .image,
+                        isHighestQuality: i == 0,
+                        isNoWatermark: true,
+                        customHeaders: threadsHeaders
+                    )
+                )
+            }
+        } else if imageUrl.lowercased().hasPrefix("http") {
             options.append(
                 MediaOption(
                     url: imageUrl,
-                    qualityLabel: options.isEmpty ? "Ảnh gốc HD" : "Ảnh bìa (Cover)",
+                    qualityLabel: options.isEmpty ? "Ảnh gốc HD (JPG)" : "Ảnh bìa (Cover)",
                     fileExtension: "jpg",
                     mediaType: .image,
                     isHighestQuality: options.isEmpty,

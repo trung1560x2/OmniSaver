@@ -436,9 +436,8 @@ class MainActivity : AppCompatActivity() {
                 cardExtracting.visibility = View.GONE
                 val slideBatch = mediaInfo.batchDownloadOptions()
                 val targetOptions = if (
-                    mediaInfo.platform == SocialPlatform.TIKTOK &&
-                    slideBatch.isNotEmpty() &&
-                    slideBatch.all { it.mediaType == MediaType.IMAGE }
+                    slideBatch.size >= 2 &&
+                    !cleanUrl.contains("/stories/", ignoreCase = true)
                 ) {
                     slideBatch
                 } else {
@@ -792,6 +791,12 @@ class MainActivity : AppCompatActivity() {
             sizeBytes = file.length(),
             lastModified = file.lastModified()
         )
+
+        btnPlayCompleted.text = when (option.mediaType) {
+            MediaType.IMAGE -> "Xem Ảnh"
+            MediaType.AUDIO -> "Nghe MP3"
+            MediaType.VIDEO -> "Phát Video"
+        }
 
         btnPlayCompleted.setOnClickListener {
             val intent = Intent(this, PlayerActivity::class.java).apply {

@@ -41,6 +41,7 @@ class QualityBottomSheetDialog(
 ) : BottomSheetDialog(context) {
 
     private val dialogScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val rowThumbCache = android.util.LruCache<String, android.graphics.Bitmap>(36)
 
     private val thumbnailHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -340,6 +341,91 @@ class QualityBottomSheetDialog(
         previewDialog.show()
     }
 
+    private fun showInlineImagePreviewDialog(option: MediaOption) {
+        val density = context.resources.displayMetrics.density
+        val container = android.widget.FrameLayout(context).apply {
+            setBackgroundColor(Color.parseColor("#0B1120"))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (440 * density).toInt()
+            )
+        }
+        val imageView = ImageView(context).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (440 * density).toInt(),
+                android.view.Gravity.CENTER
+            )
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        val progress = android.widget.ProgressBar(context).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER
+            )
+        }
+        container.addView(imageView)
+        container.addView(progress)
+
+        val cached = rowThumbCache.get(option.url)
+        if (cached != null) {
+            imageView.setImageBitmap(cached)
+            progress.visibility = View.GONE
+        }
+
+        dialogScope.launch {
+            val fullBmp = withContext(Dispatchers.IO) {
+                fetchBitmapWithHeaders(option.url, option.customHeaders)
+            }
+            progress.visibility = View.GONE
+            if (fullBmp != null) {
+                rowThumbCache.put(option.url, fullBmp)
+                imageView.setImageBitmap(fullBmp)
+            } else if (cached == null) {
+                android.widget.Toast.makeText(
+                    context,
+                    "Không thể tải xem trước tấm ảnh này.",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(context)
+            .setTitle("Xem ảnh • ${option.qualityLabel}")
+            .setView(container)
+            .setPositiveButton("Tải ảnh này") { d, _ ->
+                d.dismiss()
+                onOptionSelected(option)
+                dismiss()
+            }
+            .setNegativeButton("Đóng", null)
+            .show()
+    }
+
+    private fun fetchBitmapWithHeaders(url: String, customHeaders: Map<String, String>): android.graphics.Bitmap? {
+        return runCatching {
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header(
+                    "User-Agent",
+                    customHeaders["User-Agent"]
+                        ?: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
+                .header("Referer", customHeaders["Referer"] ?: mediaInfo.platform.referer)
+            val cookieVal = customHeaders["Cookie"].orEmpty()
+            if (cookieVal.isNotBlank()) {
+                reqBuilder.header("Cookie", cookieVal)
+            }
+            thumbnailHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                val bytes = response.body?.bytes() ?: return@use null
+                if (bytes.isEmpty()) return@use null
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }
+        }.getOrNull()
+    }
+
     private inner class QualityOptionAdapter(
         private val options: List<MediaOption>,
         private val platform: SocialPlatform,
@@ -383,14 +469,23 @@ class QualityBottomSheetDialog(
             }
 
             val sizeSuffix = if (option.sizeText.isNotBlank()) " • ${option.sizeText}" else ""
-            val previewHint = if (option.mediaType == MediaType.VIDEO) " • ▶ Xem thử" else ""
+            val previewHint = when (option.mediaType) {
+                MediaType.VIDEO -> " • ▶ Xem thử"
+                MediaType.IMAGE -> " • 🔍 Xem ảnh"
+                MediaType.AUDIO -> ""
+            }
             holder.tvExtensionAndSize.text = ".$normalizedExt$sizeSuffix$previewHint"
+
+            val iconPadPx = (11 * holder.itemView.resources.displayMetrics.density).toInt()
+            holder.ivTypeIcon.tag = option.url
 
             when (option.mediaType) {
                 MediaType.VIDEO -> {
                     holder.tvTypeBadge.text = "VIDEO"
                     holder.tvTypeBadge.setTextColor(Color.parseColor("#E0F2FE"))
                     holder.tvTypeBadge.background = LiquidGlassHelper.createPlatformGlassPill("#38BDF8")
+                    holder.ivTypeIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    holder.ivTypeIcon.setPadding(iconPadPx, iconPadPx, iconPadPx, iconPadPx)
                     holder.ivTypeIcon.setImageResource(android.R.drawable.ic_media_play)
                     holder.ivTypeIcon.setColorFilter(Color.parseColor("#38BDF8"))
                 }
@@ -398,15 +493,42 @@ class QualityBottomSheetDialog(
                     holder.tvTypeBadge.text = "AUDIO MP3"
                     holder.tvTypeBadge.setTextColor(Color.parseColor("#F3E8FF"))
                     holder.tvTypeBadge.background = LiquidGlassHelper.createPlatformGlassPill("#A855F7")
+                    holder.ivTypeIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    holder.ivTypeIcon.setPadding(iconPadPx, iconPadPx, iconPadPx, iconPadPx)
                     holder.ivTypeIcon.setImageResource(android.R.drawable.ic_lock_silent_mode_off)
                     holder.ivTypeIcon.setColorFilter(Color.parseColor("#A855F7"))
                 }
                 MediaType.IMAGE -> {
-                    holder.tvTypeBadge.text = "ẢNH BÌA / PHOTO"
+                    holder.tvTypeBadge.text = "ẢNH HD"
                     holder.tvTypeBadge.setTextColor(Color.parseColor("#FEF3C7"))
                     holder.tvTypeBadge.background = LiquidGlassHelper.createPlatformGlassPill("#F59E0B")
-                    holder.ivTypeIcon.setImageResource(android.R.drawable.ic_menu_gallery)
-                    holder.ivTypeIcon.setColorFilter(Color.parseColor("#F59E0B"))
+                    val cachedBmp = rowThumbCache.get(option.url)
+                    if (cachedBmp != null) {
+                        holder.ivTypeIcon.clearColorFilter()
+                        holder.ivTypeIcon.setPadding(0, 0, 0, 0)
+                        holder.ivTypeIcon.scaleType = ImageView.ScaleType.CENTER_CROP
+                        holder.ivTypeIcon.setImageBitmap(cachedBmp)
+                    } else {
+                        holder.ivTypeIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
+                        holder.ivTypeIcon.setPadding(iconPadPx, iconPadPx, iconPadPx, iconPadPx)
+                        holder.ivTypeIcon.setImageResource(android.R.drawable.ic_menu_gallery)
+                        holder.ivTypeIcon.setColorFilter(Color.parseColor("#F59E0B"))
+                        val expectedUrl = option.url
+                        dialogScope.launch {
+                            val bmp = withContext(Dispatchers.IO) {
+                                fetchBitmapWithHeaders(expectedUrl, option.customHeaders)
+                            }
+                            if (bmp != null) {
+                                rowThumbCache.put(expectedUrl, bmp)
+                                if (holder.ivTypeIcon.tag == expectedUrl) {
+                                    holder.ivTypeIcon.clearColorFilter()
+                                    holder.ivTypeIcon.setPadding(0, 0, 0, 0)
+                                    holder.ivTypeIcon.scaleType = ImageView.ScaleType.CENTER_CROP
+                                    holder.ivTypeIcon.setImageBitmap(bmp)
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -440,8 +562,10 @@ class QualityBottomSheetDialog(
             }
 
             holder.cardTypeIcon.setOnClickListener {
-                if (option.mediaType == MediaType.VIDEO) {
-                    showInlineVideoPreviewDialog(option)
+                when (option.mediaType) {
+                    MediaType.VIDEO -> showInlineVideoPreviewDialog(option)
+                    MediaType.IMAGE -> showInlineImagePreviewDialog(option)
+                    MediaType.AUDIO -> Unit
                 }
             }
 

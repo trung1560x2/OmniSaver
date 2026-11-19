@@ -7,6 +7,14 @@ private struct PlayableVideoTarget: Identifiable {
     let title: String
 }
 
+private struct PreviewableImageTarget: Identifiable {
+    let id = UUID()
+    let url: URL
+    let title: String
+    let option: MediaOption?
+    let mediaInfo: ExtractedMediaInfo?
+}
+
 private struct SharePayloadTarget: Identifiable {
     let id = UUID()
     let items: [Any]
@@ -33,6 +41,7 @@ struct ContentView: View {
     @State private var availableOtaRelease: OtaReleaseInfo? = nil
 
     @State private var activeVideoTarget: PlayableVideoTarget? = nil
+    @State private var activeImageTarget: PreviewableImageTarget? = nil
     @State private var activeShareTarget: SharePayloadTarget? = nil
 
     var body: some View {
@@ -91,6 +100,18 @@ struct ContentView: View {
         }
         .sheet(item: $activeVideoTarget) { target in
             VideoPlayerSheet(url: target.url, title: target.title)
+        }
+        .sheet(item: $activeImageTarget) { target in
+            ImagePreviewSheet(
+                url: target.url,
+                title: target.title,
+                onDownload: {
+                    guard let opt = target.option, let mInfo = target.mediaInfo else { return nil }
+                    return {
+                        triggerDownload(info: mInfo, option: opt)
+                    }
+                }()
+            )
         }
         .sheet(item: $activeShareTarget) { payload in
             ShareSheet(items: payload.items)
@@ -609,12 +630,14 @@ struct ContentView: View {
                 Divider().background(Color.white.opacity(0.15))
 
                 let batchOptions = info.batchDownloadOptions
+                let isAllPhotoBatch = batchOptions.count > 1 && batchOptions.allSatisfy { $0.mediaType == .image }
+                let batchLabelNoun = isAllPhotoBatch ? "Ảnh HD" : "Story / Video / Ảnh"
                 if batchOptions.count > 1 {
                     HStack(spacing: 8) {
-                        Image(systemName: "square.stack.3d.down.right.fill")
+                        Image(systemName: isAllPhotoBatch ? "photo.stack.fill" : "square.stack.3d.down.right.fill")
                             .foregroundColor(.green)
                             .font(.system(size: 14, weight: .bold))
-                        Text("Phát hiện trọn bộ \(batchOptions.count) Story / Video của \(info.author)")
+                        Text("Phát hiện trọn bộ \(batchOptions.count) \(batchLabelNoun) của \(info.author)")
                             .font(.system(size: 12, weight: .bold, design: .rounded))
                             .foregroundColor(.white.opacity(0.95))
                             .lineLimit(2)
@@ -700,13 +723,37 @@ struct ContentView: View {
                                     .font(.system(size: 17, weight: .bold))
                                     .foregroundColor(isChecked ? .cyan : .white.opacity(0.45))
 
-                                    Image(
-                                        systemName: option.mediaType == .audio
-                                            ? "waveform.circle.fill"
-                                            : (option.mediaType == .image ? "photo.fill" : "video.fill")
-                                    )
-                                    .foregroundColor(isChecked ? .cyan : .white.opacity(0.75))
-                                    .font(.system(size: 14))
+                                    if option.mediaType == .image, let imgThumbUrl = URL(string: option.url) {
+                                        AsyncImage(url: imgThumbUrl) { phase in
+                                            switch phase {
+                                            case .success(let img):
+                                                img
+                                                    .resizable()
+                                                    .scaledToFill()
+                                            default:
+                                                ZStack {
+                                                    Color.white.opacity(0.08)
+                                                    Image(systemName: "photo.fill")
+                                                        .font(.system(size: 13))
+                                                        .foregroundColor(.cyan.opacity(0.85))
+                                                }
+                                            }
+                                        }
+                                        .frame(width: 34, height: 34)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .strokeBorder(Color.white.opacity(0.24), lineWidth: 0.8)
+                                        )
+                                    } else {
+                                        Image(
+                                            systemName: option.mediaType == .audio
+                                                ? "waveform.circle.fill"
+                                                : (option.mediaType == .image ? "photo.fill" : "video.fill")
+                                        )
+                                        .foregroundColor(isChecked ? .cyan : .white.opacity(0.75))
+                                        .font(.system(size: 14))
+                                    }
 
                                     Text(option.qualityLabel)
                                         .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -749,6 +796,22 @@ struct ContentView: View {
                                 }
                                 .buttonStyle(LiquidSpringButtonStyle(scaleAmount: 0.92))
                                 .accessibilityLabel("Xem thử \(option.qualityLabel)")
+                            } else if option.mediaType == .image, let imgUrl = URL(string: option.url) {
+                                Button(action: {
+                                    activeImageTarget = PreviewableImageTarget(
+                                        url: imgUrl,
+                                        title: "\(info.title) • \(option.qualityLabel)",
+                                        option: option,
+                                        mediaInfo: info
+                                    )
+                                }) {
+                                    Image(systemName: "magnifyingglass.circle.fill")
+                                        .font(.system(size: 22, weight: .semibold))
+                                        .foregroundColor(.cyan)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(LiquidSpringButtonStyle(scaleAmount: 0.92))
+                                .accessibilityLabel("Phóng to xem \(option.qualityLabel)")
                             }
                         }
                         .padding(.horizontal, 12)
@@ -801,7 +864,20 @@ struct ContentView: View {
                             triggerDownload(info: info, option: activeOption)
                         }
 
-                        if let streamUrl = URL(string: activeOption.url), activeOption.audioUrl == nil {
+                        if activeOption.mediaType == .image, let imgUrl = URL(string: activeOption.url) {
+                            LiquidGlassPillButton(
+                                title: "Xem ảnh",
+                                systemImage: "eye.fill",
+                                tintColor: .cyan
+                            ) {
+                                activeImageTarget = PreviewableImageTarget(
+                                    url: imgUrl,
+                                    title: "\(info.title) • \(activeOption.qualityLabel)",
+                                    option: activeOption,
+                                    mediaInfo: info
+                                )
+                            }
+                        } else if let streamUrl = URL(string: activeOption.url), activeOption.audioUrl == nil {
                             LiquidGlassPillButton(
                                 title: "Xem thử",
                                 systemImage: "play.fill",
@@ -820,8 +896,8 @@ struct ContentView: View {
                     LiquidGlassPrimaryButton(
                         title: downloadManager.isDownloading
                             ? "Đang tải trọn bộ \(batchOptions.count) mục..."
-                            : "Tải trọn bộ \(batchOptions.count) Story / Video về Ảnh (Full HD)",
-                        systemImage: "square.stack.3d.down.right.fill",
+                            : "Tải trọn bộ \(batchOptions.count) \(batchLabelNoun) về Ảnh (Full HD)",
+                        systemImage: isAllPhotoBatch ? "photo.stack.fill" : "square.stack.3d.down.right.fill",
                         isDisabled: downloadManager.isDownloading,
                         isLoading: downloadManager.isDownloading,
                         gradientColors: [
@@ -910,14 +986,23 @@ struct ContentView: View {
 
                                 HStack(spacing: 8) {
                                     LiquidGlassPillButton(
-                                        title: "Phát",
-                                        systemImage: "play.circle.fill",
+                                        title: item.mediaType == .image ? "Xem" : "Phát",
+                                        systemImage: item.mediaType == .image ? "eye.circle.fill" : "play.circle.fill",
                                         tintColor: .cyan
                                     ) {
-                                        activeVideoTarget = PlayableVideoTarget(
-                                            url: item.fileURL,
-                                            title: item.title
-                                        )
+                                        if item.mediaType == .image {
+                                            activeImageTarget = PreviewableImageTarget(
+                                                url: item.fileURL,
+                                                title: item.title,
+                                                option: nil,
+                                                mediaInfo: nil
+                                            )
+                                        } else {
+                                            activeVideoTarget = PlayableVideoTarget(
+                                                url: item.fileURL,
+                                                title: item.title
+                                            )
+                                        }
                                     }
 
                                     LiquidGlassPillButton(
