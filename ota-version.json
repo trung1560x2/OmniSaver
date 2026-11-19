@@ -1,11 +1,11 @@
 {
-    "versionCode":  10,
-    "versionName":  "2.6.1-FullHD",
-    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.1-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.1_FullHD.apk",
-    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.1-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.1_FullHD.ipa",
-    "changelog":  "• Gộp sạch các luồng trùng độ phân giải trên cùng 1 video (khắc phục triệt để tình trạng Instagram Story hiện 13 dòng HD 720p giống hệt nhau; mỗi mức 1080p / 720p / SD chỉ giữ 1 bản nét nhất kèm thông số kích thước WxH)\n• Bổ sung nút ▶ Xem thử video trực tiếp ngay trên từng dòng chọn tải (cả Android và iOS) để xem chắc chắn đúng video trước khi tải",
+    "versionCode":  11,
+    "versionName":  "2.6.2-FullHD",
+    "apkUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.2-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.2_FullHD.apk",
+    "ipaUrl":  "https://github.com/trung1560x2/OmniSaver/releases/download/v2.6.2-FullHD/OmniSaver_iOS27_LiquidGlass_v2.6.2_FullHD.ipa",
+    "changelog":  "• Sửa triệt để lỗi vỡ khung huy hiệu \u0027TỐT NHẤT\u0027 bị ép dọc thành vạch xanh trên thẻ chọn chất lượng\n• Sửa hiển thị ảnh thu nhỏ (Thumbnail) trên Instagram Story riêng tư bằng JSON parser chuẩn \u0026 đính kèm Cookie\n• Bổ sung bóc tách trọn bộ tất cả Story Instagram đang có của người đó (giống Facebook), hiển thị rõ thứ tự và giờ đăng từng Story (Story #1 • 09:40, Story #2 (Link này • 10:15)...) kèm tải hàng loạt 1 chạm",
     "publishedAt":  "2026-11-19",
-    "fileSizeBytes":  5386934,
-    "sha256":  "948b35b375e6c640cbfe8e134d7353426ea4e033f2a4bff49aec5c151c53fb35",
+    "fileSizeBytes":  5380786,
+    "sha256":  "9eb94277ba5b1f3838687df84c657cd42fb2b4cdfc64048f8e9bf9f3b9564bbf",
     "forceUpdate":  false
 }

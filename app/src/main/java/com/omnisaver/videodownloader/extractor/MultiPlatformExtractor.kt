@@ -2111,6 +2111,219 @@ class MultiPlatformExtractor(private val context: Context) {
         return results.sortedByDescending { it.score }
     }
 
+    private fun extractInstagramStoryBucket(
+        authorUserId: String,
+        targetStoryPk: String?,
+        originalInput: String,
+        cleanUrl: String,
+        igHeaders: Map<String, String>,
+        cookie: String
+    ): ExtractedMediaInfo? {
+        if (authorUserId.isBlank()) return null
+        val reelEndpoints = listOf(
+            "https://i.instagram.com/api/v1/feed/reels_media/?reel_ids=$authorUserId",
+            "https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=$authorUserId"
+        )
+        val timeFmt = java.text.SimpleDateFormat("HH:mm", Locale.getDefault())
+
+        for (endpoint in reelEndpoints) {
+            val req = Request.Builder()
+                .url(endpoint)
+                .header("User-Agent", INSTAGRAM_ANDROID_APP_UA)
+                .header("Accept", "application/json")
+                .header("X-IG-App-ID", IG_WEB_APP_ID)
+                .header("Cookie", cookie)
+                .get()
+                .build()
+
+            val bodyStr = runCatching {
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string() else null
+                }
+            }.getOrNull() ?: continue
+
+            val rootJson = runCatching { JSONObject(bodyStr) }.getOrNull() ?: continue
+            val reelsObj = rootJson.optJSONObject("reels")
+            val reelNode: JSONObject = reelsObj?.optJSONObject(authorUserId)
+                ?: reelsObj?.keys()?.asSequence()?.firstOrNull()?.let { reelsObj.optJSONObject(it) }
+                ?: rootJson.optJSONArray("reels_media")?.optJSONObject(0)
+                ?: continue
+
+            val userObj = reelNode.optJSONObject("user")
+            val unameRaw = userObj?.optString("username", "").orEmpty()
+            val username = if (unameRaw.isNotBlank()) "@$unameRaw" else "Instagram"
+            val profilePic = userObj?.optString("profile_pic_url", "").orEmpty()
+
+            val itemsArr = reelNode.optJSONArray("items") ?: continue
+            if (itemsArr.length() == 0) continue
+
+            data class ParsedIgStoryItem(
+                val pk: String,
+                val timeBadge: String,
+                val thumbUrl: String,
+                val options: List<MediaOption>
+            )
+
+            val parsedItems = ArrayList<ParsedIgStoryItem>()
+            for (i in 0 until itemsArr.length()) {
+                val itemObj = itemsArr.optJSONObject(i) ?: continue
+                val rawPk = itemObj.optString("pk", "").ifBlank {
+                    itemObj.optString("id", "").substringBefore('_')
+                }
+                val takenAtSec = itemObj.optLong("taken_at", 0L)
+                val timeBadge = if (takenAtSec > 0L) {
+                    " • ${timeFmt.format(java.util.Date(takenAtSec * 1000L))}"
+                } else {
+                    ""
+                }
+
+                val candidatesArr = itemObj.optJSONObject("image_versions2")?.optJSONArray("candidates")
+                var itemThumb = ""
+                if (candidatesArr != null && candidatesArr.length() > 0) {
+                    itemThumb = candidatesArr.optJSONObject(0)?.optString("url", "").orEmpty()
+                }
+
+                val videoVersionsArr = itemObj.optJSONArray("video_versions")
+                val itemOptions = ArrayList<MediaOption>()
+                if (videoVersionsArr != null && videoVersionsArr.length() > 0) {
+                    data class IgVidVar(val url: String, val w: Int, val h: Int, val score: Int, val label: String)
+                    val variants = ArrayList<IgVidVar>()
+                    for (vIdx in 0 until videoVersionsArr.length()) {
+                        val vObj = videoVersionsArr.optJSONObject(vIdx) ?: continue
+                        val vUrl = vObj.optString("url", "").trim()
+                        if (!vUrl.startsWith("http", ignoreCase = true)) continue
+                        val w = vObj.optInt("width", 0)
+                        val h = vObj.optInt("height", 0)
+                        val minDim = if (w > 0 && h > 0) minOf(w, h) else 0
+                        val maxDim = maxOf(w, h)
+                        val score = when {
+                            minDim >= 1080 || maxDim >= 1920 -> 1080
+                            minDim >= 720 || maxDim >= 1280 -> 720
+                            minDim >= 540 -> 540
+                            minDim >= 480 -> 480
+                            else -> 360
+                        }
+                        val dimBadge = if (w > 0 && h > 0) " (${w}x${h})" else ""
+                        val label = when {
+                            score >= 1080 -> "Full HD 1080p$dimBadge (MP4)"
+                            score >= 720 -> "HD 720p$dimBadge (MP4)"
+                            else -> "SD ${score}p$dimBadge (MP4)"
+                        }
+                        variants.add(IgVidVar(vUrl, w, h, score, label))
+                    }
+                    variants.sortByDescending { it.w * it.h }
+                    for (v in variants) {
+                        itemOptions.add(
+                            MediaOption(
+                                url = v.url,
+                                qualityLabel = v.label,
+                                extension = "mp4",
+                                mediaType = MediaType.VIDEO,
+                                isHighestQuality = false,
+                                isNoWatermark = true,
+                                customHeaders = igHeaders
+                            )
+                        )
+                    }
+                } else if (itemThumb.startsWith("http", ignoreCase = true)) {
+                    itemOptions.add(
+                        MediaOption(
+                            url = itemThumb,
+                            qualityLabel = "Ảnh Story HD (JPG)",
+                            extension = "jpg",
+                            mediaType = MediaType.IMAGE,
+                            isHighestQuality = false,
+                            isNoWatermark = true,
+                            customHeaders = igHeaders
+                        )
+                    )
+                }
+
+                if (itemOptions.isNotEmpty()) {
+                    parsedItems.add(ParsedIgStoryItem(rawPk, timeBadge, itemThumb, itemOptions))
+                }
+            }
+
+            if (parsedItems.isEmpty()) continue
+
+            val matchedIdx = if (!targetStoryPk.isNullOrBlank()) {
+                parsedItems.indexOfFirst { it.pk == targetStoryPk }
+            } else {
+                -1
+            }
+            val targetIdx = if (matchedIdx >= 0) matchedIdx else 0
+            val hasExplicitTarget = matchedIdx >= 0
+            val totalStories = parsedItems.size
+            val primaryItem = parsedItems[targetIdx]
+
+            val finalOptions = ArrayList<MediaOption>()
+            primaryItem.options.forEachIndexed { idx, opt ->
+                val prefix = if (totalStories > 1) {
+                    "Story #${targetIdx + 1} (Link này${primaryItem.timeBadge}) • "
+                } else {
+                    "Story #1${primaryItem.timeBadge} • "
+                }
+                finalOptions.add(
+                    opt.copy(
+                        qualityLabel = "$prefix${opt.qualityLabel}",
+                        isHighestQuality = (idx == 0)
+                    )
+                )
+            }
+
+            if (totalStories > 1) {
+                for (idx in parsedItems.indices) {
+                    if (idx == targetIdx) continue
+                    val other = parsedItems[idx]
+                    val bestOpt = other.options.first()
+                    finalOptions.add(
+                        bestOpt.copy(
+                            qualityLabel = "Story #${idx + 1}${other.timeBadge} • ${bestOpt.qualityLabel}",
+                            isHighestQuality = false
+                        )
+                    )
+                }
+            }
+
+            val bestThumb = primaryItem.thumbUrl.ifBlank { profilePic }
+            if (bestThumb.startsWith("http", ignoreCase = true) && finalOptions.none { it.url == bestThumb }) {
+                finalOptions.add(
+                    MediaOption(
+                        url = bestThumb,
+                        qualityLabel = "Ảnh bìa Story HD (Cover)",
+                        extension = "jpg",
+                        mediaType = MediaType.IMAGE,
+                        isHighestQuality = false,
+                        isNoWatermark = true,
+                        customHeaders = igHeaders
+                    )
+                )
+            }
+
+            val shortId = primaryItem.pk.ifBlank { authorUserId }.takeLast(4)
+            val displayTitle = when {
+                totalStories > 1 && hasExplicitTarget ->
+                    "Story #${targetIdx + 1}/$totalStories của $username (#$shortId)"
+                totalStories > 1 ->
+                    "Trọn bộ $totalStories Story của $username (#$shortId)"
+                else ->
+                    "Story Instagram của $username (#$shortId)"
+            }
+
+            return ExtractedMediaInfo(
+                originalUrl = originalInput,
+                cleanUrl = cleanUrl,
+                platform = SocialPlatform.INSTAGRAM,
+                title = displayTitle,
+                author = username,
+                thumbnailUrl = bestThumb,
+                durationSeconds = 0L,
+                options = finalOptions
+            )
+        }
+        return null
+    }
+
     private fun extractInstagramDirect(originalInput: String, cleanUrl: String): ExtractedMediaInfo? {
         val cookie = authCookieStore.getEffectiveCookie(SocialPlatform.INSTAGRAM, cleanUrl)
         val igHeaders = buildMediaHeaders(SocialPlatform.INSTAGRAM, cookie)
@@ -2119,12 +2332,48 @@ class MultiPlatformExtractor(private val context: Context) {
         val shortcode = shortcodeMatch?.groupValues?.getOrNull(1)
         val storyPkMatch = Regex("""/stories/[^/]+/(\d{10,25})""").find(cleanUrl)
         val storyPk = storyPkMatch?.groupValues?.getOrNull(1)
+        val storyUsername = Regex("""/stories/([^/?#]+)""", RegexOption.IGNORE_CASE)
+            .find(cleanUrl)?.groupValues?.getOrNull(1)
+            ?.takeIf { !it.equals("highlights", ignoreCase = true) }
+        val isStoryUrl = cleanUrl.contains("/stories/", ignoreCase = true)
         val mediaId = storyPk ?: shortcode?.let { instagramShortcodeToMediaId(it) }
         val shortIgId = (mediaId ?: shortcode ?: cleanUrl.hashCode().toUInt().toString()).takeLast(4)
 
         val hasSessionId = cookie.contains("sessionid=")
 
-        // 1. If logged in and mediaId is known, query Instagram Mobile API v1 for true 1080p Full HD video_versions & DASH
+        // 0. If this is an Instagram `/stories/<username>/` URL without `storyPk` and user is logged in,
+        // resolve `authorUserId` via `web_profile_info` and fetch the entire Story Bucket!
+        if (hasSessionId && isStoryUrl && storyPk.isNullOrBlank() && !storyUsername.isNullOrBlank()) {
+            val profileReq = Request.Builder()
+                .url("https://i.instagram.com/api/v1/users/web_profile_info/?username=$storyUsername")
+                .header("User-Agent", INSTAGRAM_ANDROID_APP_UA)
+                .header("Accept", "application/json")
+                .header("X-IG-App-ID", IG_WEB_APP_ID)
+                .header("Cookie", cookie)
+                .get()
+                .build()
+            val resolvedUid = runCatching {
+                httpClient.newCall(profileReq).execute().use { resp ->
+                    val txt = if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+                    JSONObject(txt).optJSONObject("data")?.optJSONObject("user")?.optString("id", "").orEmpty()
+                }
+            }.getOrNull().orEmpty()
+            if (resolvedUid.isNotBlank()) {
+                val bucketInfo = extractInstagramStoryBucket(
+                    authorUserId = resolvedUid,
+                    targetStoryPk = null,
+                    originalInput = originalInput,
+                    cleanUrl = cleanUrl,
+                    igHeaders = igHeaders,
+                    cookie = cookie
+                )
+                if (bucketInfo != null && bucketInfo.options.isNotEmpty()) {
+                    return bucketInfo
+                }
+            }
+        }
+
+        // 1. If logged in and mediaId is known, query Instagram Mobile API v1 for true 1080p Full HD video_versions & Story Bucket
         if (hasSessionId && !mediaId.isNullOrBlank()) {
             val apiEndpoints = listOf(
                 "https://i.instagram.com/api/v1/media/$mediaId/info/",
@@ -2145,6 +2394,29 @@ class MultiPlatformExtractor(private val context: Context) {
                         if (resp.isSuccessful) resp.body?.string() else null
                     }
                 }.getOrNull() ?: continue
+
+                // If this is a Story URL, extract authorUserId from `items[0].user.pk` and pull ALL active stories of this person!
+                val parsedJsonItem = runCatching {
+                    JSONObject(apiBody).optJSONArray("items")?.optJSONObject(0)
+                }.getOrNull()
+
+                if (isStoryUrl && parsedJsonItem != null) {
+                    val ownerUid = parsedJsonItem.optJSONObject("user")?.optString("pk", "").orEmpty()
+                        .ifBlank { parsedJsonItem.optJSONObject("user")?.optString("id", "").orEmpty() }
+                    if (ownerUid.isNotBlank()) {
+                        val bucketInfo = extractInstagramStoryBucket(
+                            authorUserId = ownerUid,
+                            targetStoryPk = storyPk,
+                            originalInput = originalInput,
+                            cleanUrl = cleanUrl,
+                            igHeaders = igHeaders,
+                            cookie = cookie
+                        )
+                        if (bucketInfo != null && bucketInfo.options.isNotEmpty()) {
+                            return bucketInfo
+                        }
+                    }
+                }
 
                 val unescapedApi = unescapeHtmlAndJson(apiBody)
                 val versionCandidates = extractInstagramVideoVersionsFromText(unescapedApi).toMutableList()
@@ -2167,14 +2439,27 @@ class MultiPlatformExtractor(private val context: Context) {
                     }
                 }
 
-                if (versionCandidates.isNotEmpty()) {
-                    val thumb = Regex(""""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)"""")
+                val jsonThumb = parsedJsonItem?.optJSONObject("image_versions2")
+                    ?.optJSONArray("candidates")
+                    ?.optJSONObject(0)
+                    ?.optString("url", "")
+                    .orEmpty()
+                val thumb = jsonThumb.ifBlank {
+                    Regex(""""image_versions2"\s*:\s*\{[\s\S]{0,600}?"url"\s*:\s*"(https?:[^"]+)"""")
                         .find(unescapedApi)?.groupValues?.getOrNull(1)?.let { sanitizeCandidateUrl(it) }.orEmpty()
-                    val username = Regex(""""username"\s*:\s*"([^"]+)"""")
-                        .find(unescapedApi)?.groupValues?.getOrNull(1)?.let { "@$it" } ?: "Instagram"
-                    val captionText = Regex(""""caption"\s*:\s*\{[^{}]*"text"\s*:\s*"([^"]+)"""")
-                        .find(unescapedApi)?.groupValues?.getOrNull(1)
+                }
+
+                if (versionCandidates.isNotEmpty() || thumb.startsWith("http", ignoreCase = true)) {
+                    val username = parsedJsonItem?.optJSONObject("user")?.optString("username", "")
+                        ?.takeIf { it.isNotBlank() }?.let { "@$it" }
+                        ?: Regex(""""username"\s*:\s*"([^"]+)"""")
+                            .find(unescapedApi)?.groupValues?.getOrNull(1)?.let { "@$it" }
+                        ?: "Instagram"
+                    val captionText = parsedJsonItem?.optJSONObject("caption")?.optString("text", "")
                         ?.takeIf { it.isNotBlank() }
+                        ?: Regex(""""caption"\s*:\s*\{[^{}]*"text"\s*:\s*"([^"]+)"""")
+                            .find(unescapedApi)?.groupValues?.getOrNull(1)
+                            ?.takeIf { it.isNotBlank() }
                         ?: if (!storyPk.isNullOrBlank()) "Story Instagram của $username (#$shortIgId)" else "Video Instagram của $username (#$shortIgId)"
 
                     val sortedCands = versionCandidates.sortedWith(
@@ -2205,10 +2490,10 @@ class MultiPlatformExtractor(private val context: Context) {
                         options.add(
                             MediaOption(
                                 url = thumb,
-                                qualityLabel = "Ảnh bìa HD (Cover)",
+                                qualityLabel = if (options.isEmpty()) "Ảnh Story / Bài đăng HD (JPG)" else "Ảnh bìa HD (Cover)",
                                 extension = "jpg",
                                 mediaType = MediaType.IMAGE,
-                                isHighestQuality = false,
+                                isHighestQuality = options.isEmpty(),
                                 isNoWatermark = true,
                                 customHeaders = igHeaders
                             )

@@ -11,8 +11,8 @@ android {
         applicationId = "com.omnisaver.videodownloader"
         minSdk = 24
         targetSdk = 35
-        versionCode = 10
-        versionName = "2.6.1-FullHD"
+        versionCode = 11
+        versionName = "2.6.2-FullHD"
     }
 
     buildTypes {

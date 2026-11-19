@@ -2865,15 +2865,295 @@ final class MultiPlatformExtractor {
         return results.sorted(by: { $0.score > $1.score })
     }
 
+    private func extractInstagramStoryBucket(
+        authorUserId: String,
+        targetStoryPk: String?,
+        originalInput: String,
+        igHeaders: [String: String],
+        cookie: String
+    ) async -> ExtractedMediaInfo? {
+        let reelEndpoints = [
+            "https://i.instagram.com/api/v1/feed/reels_media/?reel_ids=\(authorUserId)",
+            "https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=\(authorUserId)"
+        ]
+        let apiHeaders: [String: String] = [
+            "User-Agent": Self.instagramAndroidAppUA,
+            "Accept": "application/json",
+            "X-IG-App-ID": Self.igWebAppId,
+            "Cookie": cookie
+        ]
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "HH:mm"
+        timeFormatter.locale = Locale(identifier: "en_US_POSIX")
+        timeFormatter.timeZone = .current
+
+        struct ParsedStoryEntry {
+            let pk: String
+            let timeBadge: String
+            let imageUrl: String
+            let options: [MediaOption]
+        }
+
+        for endpoint in reelEndpoints {
+            guard let (rawBody, _) = await fetchText(url: endpoint, headers: apiHeaders),
+                  let data = rawBody.data(using: .utf8),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+
+            let reelsMap = json["reels"] as? [String: Any]
+            let reelDict = (reelsMap?[authorUserId] as? [String: Any])
+                ?? (reelsMap?.values.first as? [String: Any])
+                ?? ((json["reels_media"] as? [[String: Any]])?.first)
+
+            guard let reelDict = reelDict else { continue }
+
+            let userDict = reelDict["user"] as? [String: Any]
+            let rawUsername = (userDict?["username"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let username = !rawUsername.isEmpty ? "@\(rawUsername)" : "Instagram"
+            let profilePicUrl = ((userDict?["profile_pic_url"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let rawItems = (reelDict["items"] as? [[String: Any]]) ?? []
+            guard !rawItems.isEmpty else { continue }
+
+            var parsedStories: [ParsedStoryEntry] = []
+
+            for item in rawItems {
+                let pk: String
+                if let pkStr = item["pk"] as? String, !pkStr.isEmpty {
+                    pk = pkStr
+                } else if let pkNum = item["pk"] as? NSNumber {
+                    pk = pkNum.stringValue
+                } else if let idStr = item["id"] as? String, !idStr.isEmpty {
+                    pk = idStr.components(separatedBy: "_").first ?? idStr
+                } else {
+                    pk = ""
+                }
+
+                let takenAt = (item["taken_at"] as? Int) ?? (item["taken_at"] as? NSNumber)?.intValue ?? 0
+                let timeBadge: String
+                if takenAt > 0 {
+                    let formatted = timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(takenAt)))
+                    timeBadge = " • \(formatted)"
+                } else {
+                    timeBadge = ""
+                }
+
+                let rawImageUrl = (((item["image_versions2"] as? [String: Any])?["candidates"] as? [[String: Any]])?
+                    .first?["url"] as? String) ?? ""
+                let imageUrl = rawImageUrl.isEmpty ? "" : sanitizeCandidateUrl(rawImageUrl)
+
+                let videoVersions = (item["video_versions"] as? [[String: Any]]) ?? []
+                var itemOptions: [MediaOption] = []
+
+                if !videoVersions.isEmpty {
+                    let sortedVideos = videoVersions.sorted { lhs, rhs in
+                        let lw = (lhs["width"] as? Int) ?? (lhs["width"] as? NSNumber)?.intValue ?? 0
+                        let lh = (lhs["height"] as? Int) ?? (lhs["height"] as? NSNumber)?.intValue ?? 0
+                        let rw = (rhs["width"] as? Int) ?? (rhs["width"] as? NSNumber)?.intValue ?? 0
+                        let rh = (rhs["height"] as? Int) ?? (rhs["height"] as? NSNumber)?.intValue ?? 0
+                        return (lw * lh) > (rw * rh)
+                    }
+
+                    var seenUrls = Set<String>()
+                    for vObj in sortedVideos {
+                        guard let rawVUrl = vObj["url"] as? String, !rawVUrl.isEmpty else { continue }
+                        let vUrl = sanitizeCandidateUrl(rawVUrl)
+                        guard vUrl.lowercased().hasPrefix("http"), seenUrls.insert(vUrl).inserted else { continue }
+
+                        let width = (vObj["width"] as? Int) ?? (vObj["width"] as? NSNumber)?.intValue ?? 0
+                        let height = (vObj["height"] as? Int) ?? (vObj["height"] as? NSNumber)?.intValue ?? 0
+                        let hasDims = width > 0 && height > 0
+                        let maxDim = max(width, height)
+                        let minDim = hasDims ? min(width, height) : 0
+                        let dimBadge = hasDims ? " (\(width)x\(height))" : ""
+
+                        let label: String
+                        if minDim >= 1080 || maxDim >= 1920 {
+                            label = "Full HD 1080p\(dimBadge) (MP4)"
+                        } else if minDim >= 720 || maxDim >= 1280 {
+                            label = "HD 720p\(dimBadge) (MP4)"
+                        } else {
+                            label = "SD Video\(dimBadge) (MP4)"
+                        }
+
+                        itemOptions.append(
+                            MediaOption(
+                                url: vUrl,
+                                qualityLabel: label,
+                                fileExtension: "mp4",
+                                mediaType: .video,
+                                isHighestQuality: false,
+                                isNoWatermark: true,
+                                customHeaders: igHeaders
+                            )
+                        )
+                    }
+                } else if imageUrl.lowercased().hasPrefix("http") {
+                    itemOptions.append(
+                        MediaOption(
+                            url: imageUrl,
+                            qualityLabel: "Ảnh Story HD (JPG)",
+                            fileExtension: "jpg",
+                            mediaType: .image,
+                            isHighestQuality: false,
+                            isNoWatermark: true,
+                            customHeaders: igHeaders
+                        )
+                    )
+                }
+
+                if !itemOptions.isEmpty {
+                    parsedStories.append(
+                        ParsedStoryEntry(
+                            pk: pk,
+                            timeBadge: timeBadge,
+                            imageUrl: imageUrl,
+                            options: itemOptions
+                        )
+                    )
+                }
+            }
+
+            guard !parsedStories.isEmpty else { continue }
+
+            let matchedIdx: Int?
+            if let targetPk = targetStoryPk, !targetPk.isEmpty {
+                matchedIdx = parsedStories.firstIndex(where: { $0.pk == targetPk })
+            } else {
+                matchedIdx = nil
+            }
+            let hasExplicitTarget = (matchedIdx != nil)
+            let targetIdx = matchedIdx ?? 0
+            let total = parsedStories.count
+            let targetEntry = parsedStories[targetIdx]
+
+            var combinedOptions: [MediaOption] = []
+            let targetPrefix: String
+            if total > 1 {
+                targetPrefix = "Story #\(targetIdx + 1) (Link này\(targetEntry.timeBadge)) • "
+            } else {
+                targetPrefix = "Story #1\(targetEntry.timeBadge) • "
+            }
+
+            for (optIdx, opt) in targetEntry.options.enumerated() {
+                combinedOptions.append(
+                    MediaOption(
+                        url: opt.url,
+                        qualityLabel: "\(targetPrefix)\(opt.qualityLabel)",
+                        fileExtension: opt.fileExtension,
+                        mediaType: opt.mediaType,
+                        isHighestQuality: optIdx == 0,
+                        isNoWatermark: opt.isNoWatermark,
+                        customHeaders: opt.customHeaders,
+                        audioUrl: opt.audioUrl
+                    )
+                )
+            }
+
+            for (idx, entry) in parsedStories.enumerated() where idx != targetIdx {
+                guard let bestOpt = entry.options.first else { continue }
+                combinedOptions.append(
+                    MediaOption(
+                        url: bestOpt.url,
+                        qualityLabel: "Story #\(idx + 1)\(entry.timeBadge) • \(bestOpt.qualityLabel)",
+                        fileExtension: bestOpt.fileExtension,
+                        mediaType: bestOpt.mediaType,
+                        isHighestQuality: false,
+                        isNoWatermark: bestOpt.isNoWatermark,
+                        customHeaders: bestOpt.customHeaders,
+                        audioUrl: bestOpt.audioUrl
+                    )
+                )
+            }
+
+            guard !combinedOptions.isEmpty else { continue }
+
+            let cleanProfilePic = profilePicUrl.isEmpty ? "" : sanitizeCandidateUrl(profilePicUrl)
+            let thumbnailUrl = targetEntry.imageUrl.lowercased().hasPrefix("http")
+                ? targetEntry.imageUrl
+                : cleanProfilePic
+
+            let refIdSource = !targetEntry.pk.isEmpty ? targetEntry.pk : authorUserId
+            let shortId = String(refIdSource.suffix(4))
+            let title: String
+            if total > 1 && hasExplicitTarget {
+                title = "Story #\(targetIdx + 1)/\(total) của \(username) (#\(shortId))"
+            } else if total > 1 {
+                title = "Trọn bộ \(total) Story của \(username) (#\(shortId))"
+            } else {
+                title = "Story Instagram của \(username) (#\(shortId))"
+            }
+
+            return ExtractedMediaInfo(
+                originalUrl: originalInput,
+                platform: .instagram,
+                title: title,
+                author: username,
+                thumbnailUrl: thumbnailUrl,
+                durationSeconds: 0,
+                options: combinedOptions
+            )
+        }
+
+        return nil
+    }
+
     private func extractInstagramDirect(originalInput: String, cleanUrl: String) async -> ExtractedMediaInfo? {
         let cookie = AuthCookieStore.shared.getEffectiveCookie(for: .instagram, targetUrl: cleanUrl)
         let igHeaders = buildMediaHeaders(for: .instagram, cookie: cookie)
 
         let shortcode = firstRegexMatch(pattern: #"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)"#, in: cleanUrl)?.group(1)
         let storyPk = firstRegexMatch(pattern: #"/stories/[^/]+/(\d{10,25})"#, in: cleanUrl)?.group(1)
+        let rawStoryUsername = firstRegexMatch(pattern: #"/stories/([^/?#]+)"#, in: cleanUrl)?.group(1)
+        let storyUsername: String? = {
+            guard let uname = rawStoryUsername?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !uname.isEmpty,
+                  uname.caseInsensitiveCompare("highlights") != .orderedSame else {
+                return nil
+            }
+            return uname
+        }()
         let mediaId = storyPk ?? shortcode.flatMap { instagramShortcodeToMediaId($0) }
 
         let hasSessionId = cookie.contains("sessionid=")
+        let isIgStory = cleanUrl.lowercased().contains("/stories/")
+
+        // 0. Story URL without explicit storyPk (/stories/{username}/) -> resolve authorUserId via web_profile_info & fetch full Story bucket
+        if hasSessionId && isIgStory && storyPk == nil, let uname = storyUsername {
+            let profileEndpoints = [
+                "https://i.instagram.com/api/v1/users/web_profile_info/?username=\(uname)",
+                "https://www.instagram.com/api/v1/users/web_profile_info/?username=\(uname)"
+            ]
+            let profileHeaders: [String: String] = [
+                "User-Agent": Self.instagramAndroidAppUA,
+                "Accept": "application/json",
+                "X-IG-App-ID": Self.igWebAppId,
+                "Cookie": cookie
+            ]
+            for profileEndpoint in profileEndpoints {
+                guard let (profileBody, _) = await fetchText(url: profileEndpoint, headers: profileHeaders),
+                      !profileBody.isEmpty else {
+                    continue
+                }
+                let unescapedProfile = unescapeHtmlAndJson(profileBody)
+                if let authorUserId = firstRegexMatch(pattern: #""id"\s*:\s*"(\d+)""#, in: unescapedProfile)?.group(1),
+                   !authorUserId.isEmpty {
+                    if let bucketInfo = await extractInstagramStoryBucket(
+                        authorUserId: authorUserId,
+                        targetStoryPk: nil,
+                        originalInput: originalInput,
+                        igHeaders: igHeaders,
+                        cookie: cookie
+                    ), !bucketInfo.options.isEmpty {
+                        return bucketInfo
+                    }
+                    break
+                }
+            }
+        }
 
         // 1. If logged in and mediaId is known, query Instagram Mobile API v1 for true 1080p Full HD `video_versions` & `video_dash_manifest`
         if hasSessionId, let mediaId = mediaId, !mediaId.isEmpty {
@@ -2894,6 +3174,24 @@ final class MultiPlatformExtractor {
                 }
 
                 let unescapedApi = unescapeHtmlAndJson(apiBody)
+
+                if isIgStory {
+                    if let authorUserId = firstRegexMatch(
+                        pattern: #""user"\s*:\s*\{[^{}]*"(?:pk|id)"\s*:\s*"?(\d+)"?"#,
+                        in: unescapedApi
+                    )?.group(1), !authorUserId.isEmpty {
+                        if let bucketInfo = await extractInstagramStoryBucket(
+                            authorUserId: authorUserId,
+                            targetStoryPk: storyPk ?? mediaId,
+                            originalInput: originalInput,
+                            igHeaders: igHeaders,
+                            cookie: cookie
+                        ), !bucketInfo.options.isEmpty {
+                            return bucketInfo
+                        }
+                    }
+                }
+
                 var versionCandidates = extractInstagramVideoVersionsFromText(unescapedApi)
                 var seenUrls = Set(versionCandidates.map { $0.url })
 
@@ -2914,11 +3212,12 @@ final class MultiPlatformExtractor {
                     )
                 }
 
-                if !versionCandidates.isEmpty {
-                    let thumb = firstRegexMatch(
-                        pattern: #""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)""#,
-                        in: unescapedApi
-                    )?.group(1).map { sanitizeCandidateUrl($0) } ?? ""
+                let thumb = firstRegexMatch(
+                    pattern: #""image_versions2"\s*:\s*\{[\s\S]{0,600}?"url"\s*:\s*"(https?:[^"]+)""#,
+                    in: unescapedApi
+                )?.group(1).map { sanitizeCandidateUrl($0) } ?? ""
+
+                if !versionCandidates.isEmpty || (isIgStory && thumb.lowercased().hasPrefix("http")) {
                     let username: String
                     if let uname = firstRegexMatch(pattern: #""username"\s*:\s*"([^"]+)""#, in: unescapedApi)?.group(1), !uname.isEmpty {
                         username = "@\(uname)"
@@ -2930,7 +3229,6 @@ final class MultiPlatformExtractor {
                         in: unescapedApi
                     )?.group(1)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     let shortId = String(mediaId.suffix(4))
-                    let isIgStory = cleanUrl.lowercased().contains("/stories/")
                     let captionText: String
                     if !rawCaption.isEmpty {
                         captionText = rawCaption
@@ -2968,13 +3266,14 @@ final class MultiPlatformExtractor {
                     }
 
                     if thumb.lowercased().hasPrefix("http") {
+                        let isPhotoOnly = options.isEmpty
                         options.append(
                             MediaOption(
                                 url: thumb,
-                                qualityLabel: "Ảnh bìa HD (Cover)",
+                                qualityLabel: isPhotoOnly ? "Ảnh Story HD (JPG)" : "Ảnh bìa HD (Cover)",
                                 fileExtension: "jpg",
                                 mediaType: .image,
-                                isHighestQuality: false,
+                                isHighestQuality: isPhotoOnly,
                                 isNoWatermark: true,
                                 customHeaders: igHeaders
                             )
@@ -3247,7 +3546,7 @@ final class MultiPlatformExtractor {
         )
 
         let candidateImg = firstRegexMatch(
-            pattern: #""image_versions2"\s*:\s*\{\s*"candidates"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)""#,
+            pattern: #""image_versions2"\s*:\s*\{[\s\S]{0,600}?"url"\s*:\s*"(https?:[^"]+)""#,
             in: unescaped
         )?.group(1).map { sanitizeCandidateUrl($0) } ?? ""
         let displayImg = firstRegexMatch(pattern: #""display_url"\s*:\s*"([^"]+)""#, in: unescaped)?

@@ -83,23 +83,16 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:background="@drawable/bg_liquid_glass_pill"
+                    android:maxLines="1"
                     android:paddingStart="8dp"
                     android:paddingTop="2dp"
                     android:paddingEnd="8dp"
                     android:paddingBottom="2dp"
+                    android:singleLine="true"
                     android:text="VIDEO"
                     android:textColor="#38BDF8"
                     android:textSize="10sp"
                     android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/tvExtensionAndSize"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="6dp"
-                    android:text=".mp4"
-                    android:textColor="#CBD5E1"
-                    android:textSize="11sp" />
 
                 <TextView
                     android:id="@+id/tvBestQualityBadge"
@@ -107,12 +100,14 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="6dp"
                     android:background="@drawable/bg_liquid_glass_pill"
+                    android:maxLines="1"
                     android:paddingStart="8dp"
                     android:paddingTop="2dp"
                     android:paddingEnd="8dp"
                     android:paddingBottom="2dp"
-                    android:text="HD / TỐT NHẤT"
-                    android:textColor="#4ADE80"
+                    android:singleLine="true"
+                    android:text="TỐT NHẤT"
+                    android:textColor="#DCFCE7"
                     android:textSize="10sp"
                     android:textStyle="bold"
                     android:visibility="gone" />
@@ -123,15 +118,30 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="6dp"
                     android:background="@drawable/bg_liquid_glass_pill"
+                    android:maxLines="1"
                     android:paddingStart="8dp"
                     android:paddingTop="2dp"
                     android:paddingEnd="8dp"
                     android:paddingBottom="2dp"
+                    android:singleLine="true"
                     android:text="KHÔNG LOGO"
                     android:textColor="#7DD3FC"
                     android:textSize="10sp"
                     android:textStyle="bold"
                     android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/tvExtensionAndSize"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:singleLine="true"
+                    android:text=".mp4"
+                    android:textColor="#CBD5E1"
+                    android:textSize="11sp" />
             </LinearLayout>
         </LinearLayout>
 

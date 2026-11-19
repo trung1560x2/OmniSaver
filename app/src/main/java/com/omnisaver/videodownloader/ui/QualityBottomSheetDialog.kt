@@ -215,16 +215,21 @@ class QualityBottomSheetDialog(
         dialogScope.launch {
             val bitmap = withContext(Dispatchers.IO) {
                 runCatching {
-                    val request = Request.Builder()
+                    val customHeaders = mediaInfo.options.firstOrNull()?.customHeaders.orEmpty()
+                    val reqBuilder = Request.Builder()
                         .url(url)
                         .header(
                             "User-Agent",
-                            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                            customHeaders["User-Agent"]
+                                ?: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                         )
-                        .header("Referer", mediaInfo.platform.referer)
-                        .build()
+                        .header("Referer", customHeaders["Referer"] ?: mediaInfo.platform.referer)
+                    val cookieVal = customHeaders["Cookie"].orEmpty()
+                    if (cookieVal.isNotBlank()) {
+                        reqBuilder.header("Cookie", cookieVal)
+                    }
 
-                    thumbnailHttpClient.newCall(request).execute().use { response ->
+                    thumbnailHttpClient.newCall(reqBuilder.build()).execute().use { response ->
                         if (!response.isSuccessful) return@use null
                         val bytes = response.body?.bytes() ?: return@use null
                         if (bytes.isEmpty()) return@use null
@@ -378,7 +383,7 @@ class QualityBottomSheetDialog(
             }
 
             val sizeSuffix = if (option.sizeText.isNotBlank()) " • ${option.sizeText}" else ""
-            val previewHint = if (option.mediaType == MediaType.VIDEO) " • Bấm ▶ xem thử" else ""
+            val previewHint = if (option.mediaType == MediaType.VIDEO) " • ▶ Xem thử" else ""
             holder.tvExtensionAndSize.text = ".$normalizedExt$sizeSuffix$previewHint"
 
             when (option.mediaType) {
